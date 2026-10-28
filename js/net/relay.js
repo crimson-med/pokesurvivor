@@ -19,14 +19,14 @@
  * API:  enabled · state ('off'|'connecting'|'online'|'offline') · uid · room
  *       connect() · request(ev, payload) · emit(ev, ...args)
  *       on(ev, fn) · off(ev, fn) · disconnect()
- *   Eventos: 'room', 'sig', 'm', 'peer', 'closed' (del servidor) y 'state'
+ *   Eventos: 'room', 'sig', 'm', 'ack', 'peer', 'closed' (del servidor) y 'state'
  *   (fn(estado), o fn('offline', código) cuando se cierra del todo por un error).
  *   room es la última sala recibida: se borra con 'closed' o disconnect().
  */
 G.Relay = (() => {
   const V = 1;                       // versión del protocolo (auth.v)
   const ACK_MS = 8000;               // espera máxima de la respuesta de request()
-  const SERVER_EVENTS = ['room', 'sig', 'm', 'peer', 'closed'];
+  const SERVER_EVENTS = ['room', 'sig', 'm', 'ack', 'peer', 'closed'];
   const CODES = ['old-version', 'bad-token', 'busy'];   // rechazos del servidor al conectar
 
   let socket = null;
