@@ -51,6 +51,11 @@
     G.Social.start().then(r => { if (r === 'ok') fn(); else G.NickUI.open(fn); });
   }
 
+  // La última IP local que escribiste (para no tener que buscarla cada vez).
+  const LAN_KEY = 'ps.lanip';
+  function lastIp() { try { return localStorage.getItem(LAN_KEY) || ''; } catch (e) { return ''; } }
+  function saveIp(ip) { try { localStorage.setItem(LAN_KEY, ip); } catch (e) { /* sin almacenamiento */ } }
+
   // ======================= AMIGOS =======================
 
   G.FriendsUI = (() => {
@@ -65,6 +70,60 @@
       };
       $('fr-room').onclick = () => G.LobbyUI.open();
       G.Social.on(() => { if (G.UI.isOpen('scr-friends')) render(); });
+
+      // Misma wifi: crear sala local o entrar por la IP del anfitrión.
+      $('fr-tabs').onclick = e => { const t = e.target.closest('.tab'); if (t) tab(t.dataset.tab); };
+      $('lan-help-btn').onclick = () => $('lan-help').classList.toggle('hidden');
+      $('lan-host').onsubmit = async e => {
+        e.preventDefault();
+        lanMsg('');
+        const ip = $('lan-ip').value.trim();
+        const r = await G.Social.setLocal(ip);
+        if (!r.ok) { lanMsg(r.error, true); return; }
+        saveIp(ip);
+        G.LobbyUI.open();
+      };
+      $('lan-join').onsubmit = async e => {
+        e.preventDefault();
+        lanMsg('');
+        $('lan-found').innerHTML = '';
+        const btn = $('lan-join').querySelector('button');
+        btn.disabled = true; btn.textContent = 'Buscando…';
+        const r = await G.Social.findLocal($('lan-join-ip').value);
+        btn.disabled = false; btn.textContent = 'Buscar sala';
+        if (!r.ok) { lanMsg(r.error, true); return; }
+        G.Audio.sfx('confirm');
+        const own = !!(G.Social.room && G.Social.room.id === r.room.id);
+        const el = document.createElement('div');
+        el.className = 'fr-row';
+        el.innerHTML = `<i class="dot on"></i><b translate="no">${esc(r.room.name)}</b><span class="st">En tu wifi · ${r.room.n}/${G.Social.MAX_PLAYERS}</span><span class="grow"></span>`;
+        const b = document.createElement('button');
+        b.className = 'btn small gold'; b.textContent = own ? 'Ir a la sala' : 'Unirme';
+        b.onclick = async () => {
+          if (!own) {
+            b.disabled = true;
+            const j = await G.Social.joinRoom(r.room.id);
+            b.disabled = false;
+            if (!j.ok) { lanMsg(j.error, true); return; }
+          }
+          G.LobbyUI.open();
+        };
+        el.appendChild(b);
+        $('lan-found').appendChild(el);
+      };
+    }
+
+    function tab(t) {
+      document.querySelectorAll('#fr-tabs .tab').forEach(x => x.classList.toggle('on', x.dataset.tab === t));
+      $('fr-online').classList.toggle('hidden', t !== 'online');
+      $('fr-lan').classList.toggle('hidden', t !== 'lan');
+      if (t === 'lan' && !$('lan-ip').value) $('lan-ip').value = lastIp();
+    }
+
+    function lanMsg(t, bad) {
+      $('lan-msg').textContent = t || '';
+      $('lan-msg').style.color = bad ? '#ffb0b8' : '';
+      if (t && bad) G.Audio.sfx('error');
     }
 
     function msg(t, bad) {
@@ -138,7 +197,7 @@
   // ======================= SALA =======================
 
   G.LobbyUI = (() => {
-    let membersKey = '';
+    let membersKey = '', hintKey = '';
 
     function init() {
       $('lobby-leave').onclick = async () => {
@@ -154,6 +213,7 @@
         const room = G.Social.room;
         if (room) {
           G.Net.open(room.id, room.isHost, room.host);
+          G.Net.setLanIp(room.isHost ? room.lanIp || null : null);
           // En partida la lista de la sala no echa a nadie (puede faltar alguien un
           // momento por un corte con la base de datos): manda el canal directo.
           if (!G.Coop.active && !room.lost) G.Net.syncMembers(room.members.map(m => m.uid));
@@ -172,7 +232,7 @@
       G.Social.refreshMember();
       G.Social.ensureFriends().then(() => { if (G.UI.isOpen('scr-lobby')) { membersKey = ''; render(); } });
       G.UI.show('scr-lobby', true);
-      membersKey = '';
+      membersKey = ''; hintKey = '';
       render();
     }
 
@@ -182,7 +242,7 @@
       if (m.uid === room.host) return 'Anfitrión';
       if (!room.isHost) return m.uid === G.Social.uid ? 'Tú' : 'En la sala';
       const mode = G.Net.mode(m.uid);
-      return mode === 'direct' ? (G.Net.viaTurn(m.uid) ? 'Conectado (por servidor)' : 'Conectado') : mode === 'relay' ? 'Conectado (por servidor)' : mode === 'failed' ? 'No se pudo conectar (reintentando…)' : 'Conectando…';
+      return mode === 'direct' ? (G.Net.viaTurn(m.uid) ? 'Conectado (por servidor)' : G.Net.lanIp ? 'Conectado (local)' : 'Conectado') : mode === 'relay' ? 'Conectado (por servidor)' : mode === 'failed' ? 'No se pudo conectar (reintentando…)' : 'Conectando…';
     }
 
     function render() {
@@ -219,6 +279,15 @@
         el.className = 'conn' + (t === 'Conectando…' ? ' wait' : '');
       });
 
+      // Misma wifi: la IP con la que entran los demás, y qué hacer si alguien no conecta.
+      const lan = $('lobby-lan');
+      lan.classList.toggle('hidden', !(room.isHost && room.lanIp));
+      if (room.isHost && room.lanIp) {
+        lan.innerHTML = `<small class="sub">Tus amigos en la misma wifi entran con</small><div class="lan-ip" translate="no">${esc(room.lanIp)}</div>`;
+      }
+      const hint = lanHint(room, ms);
+      renderHint(hint);
+
       // Invitar (sólo el anfitrión y si queda sitio).
       const canInvite = room.isHost && ms.length < G.Social.MAX_PLAYERS;
       $('lobby-inv-title').classList.toggle('hidden', !canInvite);
@@ -248,8 +317,56 @@
       btn.textContent = 'Empezar partida (' + ms.length + '/' + G.Social.MAX_PLAYERS + ')';
       $('lobby-note').textContent = !room.isHost ? 'Cuando el anfitrión empiece, entraréis todos a la vez.'
         : ms.length < 2 ? 'Necesitas al menos un amigo en la sala.'
+        : failed && hint ? ''
         : failed ? 'No se puede conectar con algún amigo: su red (o la tuya) no deja jugar en grupo. Probad con otra wifi o datos móviles; se reintenta solo.'
         : connecting ? 'Conectando con tus amigos…' : 'La partida empieza para todos a la vez.';
+    }
+
+    /*
+     * Misma wifi (28-10-2026). Si una pareja no conecta y los dos salen a internet
+     * por la misma IP pública (mismo router), el aviso de siempre no ayuda: el
+     * anfitrión puede escribir su IP local (ver net.js, lanCandidate). Con el modo
+     * local ya puesto y aun así sin conectar, la wifi no deja que los aparatos se
+     * hablen (o la IP no es la de este aparato).
+     * -> null | { kind: 'offer' | 'blocked' | 'ask', name }
+     */
+    function lanHint(room, ms) {
+      if (room.isHost) {
+        const f = ms.find(m => m.uid !== room.host && G.Net.mode(m.uid) === 'failed' && (room.lanIp || G.Net.sameNetwork(m.uid)));
+        return f ? { kind: room.lanIp ? 'blocked' : 'offer', name: f.name } : null;
+      }
+      if (G.Net.mode(room.host) !== 'failed' || !G.Net.sameNetwork(room.host)) return null;
+      return { kind: 'ask', name: (ms.find(m => m.uid === room.host) || {}).name || '' };
+    }
+
+    // Sólo se rehace si cambia (si no, se borraría lo que estás escribiendo).
+    function renderHint(h) {
+      const box = $('lobby-hint');
+      const key = h ? h.kind + '|' + h.name + '|' + (G.Social.room.lanIp || '') : '';
+      if (key === hintKey) return;
+      hintKey = key;
+      box.classList.toggle('hidden', !h);
+      if (!h) { box.innerHTML = ''; return; }
+      const name = esc(h.name);
+      if (h.kind === 'ask') {
+        box.innerHTML = `<span>Estás en la misma wifi que ${name}. Pide al anfitrión que active el modo local.</span>`;
+        return;
+      }
+      box.innerHTML = (h.kind === 'offer'
+        ? `<span>Estás en la misma wifi que ${name}. Usa el modo local para conectar directo.</span>`
+        : `<span>No se llega al aparato de ${name}. Algunas wifis (de invitados o de hotel) no dejan que los aparatos se hablen. Prueba con la zona wifi de un móvil, o revisa que la IP sea la de este aparato.</span>`) +
+        `<form class="row" autocomplete="off"><input class="field" maxlength="15" inputmode="decimal" spellcheck="false" aria-label="Tu IP local" placeholder="Tu IP local">` +
+        `<button class="btn small gold" type="submit">${h.kind === 'offer' ? 'Conectar en local' : 'Cambiar IP'}</button></form>` +
+        `<p class="err"></p>`;
+      const input = box.querySelector('input');
+      input.value = G.Social.room.lanIp || lastIp();
+      box.querySelector('form').onsubmit = async e => {
+        e.preventDefault();
+        const r = await G.Social.setLocal(input.value);
+        if (!r.ok) { box.querySelector('.err').textContent = r.error; G.Audio.sfx('error'); return; }
+        saveIp(input.value.trim());
+        G.Audio.sfx('confirm');
+      };
     }
 
     function start() {

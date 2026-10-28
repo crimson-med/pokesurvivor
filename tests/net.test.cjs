@@ -512,3 +512,81 @@ test('net busy: only an open channel with a big backlog counts as busy', async (
   assert.equal(N.busy('a'), true);
   assert.equal(N.busy('nadie'), false);
 });
+
+// ---------------- misma wifi (net.js lanCandidate, social.js lanKey) ----------------
+const HIDDEN = 'candidate:842163049 1 udp 2122260223 3a1b2c3d-1111-2222-3333-444455556666.local 54321 typ host generation 0 ufrag abcd network-cost 999';
+const srflx = ip => ({ candidate: 'candidate:1 1 udp 1686052607 ' + ip + ' 61022 typ srflx raddr 0.0.0.0 rport 0 generation 0', sdpMid: '0', sdpMLineIndex: 0 });
+
+test('same Wi-Fi: only private IPv4 counts as a local IP', () => {
+  const { N } = turnNetwork(goodTurn);
+  for (const ip of ['192.168.1.20', '10.0.0.15', '172.16.0.1', '172.31.255.254', ' 192.168.0.7 ']) assert.ok(N.isLocalIp(ip), ip);
+  for (const ip of ['8.8.8.8', '203.0.113.7', '172.15.0.1', '172.32.0.1', '192.169.1.1', '192.168.1', '192.168.1.256',
+    '192.168.01.20', 'a.b.c.d', '', null, 'fe80::1']) assert.ok(!N.isLocalIp(ip), String(ip));
+});
+
+test('same Wi-Fi: a hidden .local UDP host candidate gets a copy with the typed IP; nothing else changes', () => {
+  const { N } = turnNetwork(goodTurn);
+  const c = { candidate: HIDDEN, sdpMid: '0', sdpMLineIndex: 0, usernameFragment: 'abcd' };
+  const lan = N.lanCandidate(c, '192.168.1.20');
+  assert.equal(lan.candidate, HIDDEN.replace(/\S+\.local/, '192.168.1.20'));
+  assert.deepEqual({ ...lan, candidate: '' }, { ...c, candidate: '' }, 'same mid, line and ufrag');
+  assert.equal(c.candidate, HIDDEN, 'the original is left as it was');
+  assert.equal(N.lanCandidate(c, '8.8.8.8'), null, 'never a public IP');
+  assert.equal(N.lanCandidate({ candidate: HIDDEN.replace(' udp ', ' tcp ') }, '192.168.1.20'), null, 'UDP only');
+  assert.equal(N.lanCandidate(srflx('203.0.113.7'), '192.168.1.20'), null, 'STUN candidates stay as they are');
+  assert.equal(N.lanCandidate({ candidate: 'candidate:1 1 udp 1 192.168.1.20 5 typ host' }, '192.168.1.20'), null, 'already visible');
+  assert.equal(N.lanCandidate({ candidate: 'c1' }, '192.168.1.20'), null);
+});
+
+test('same Wi-Fi: the host sends both candidates once it has a local IP; guests never rewrite', async () => {
+  const host = turnNetwork(goodTurn);
+  host.N.open('room', true, 'host'); host.N.setLanIp('192.168.1.20'); host.N.syncMembers(['host', 'a']); await settle();
+  assert.equal(host.N.lanIp, '192.168.1.20');
+  host.pcs[0].onicecandidate({ candidate: { toJSON: () => ({ candidate: HIDDEN }) } });
+  host.pcs[0].onicecandidate({ candidate: null });
+  assert.deepEqual(host.signals.at(-1)[1].sig.cs.map(c => c.candidate), [HIDDEN, HIDDEN.replace(/\S+\.local/, '192.168.1.20')]);
+
+  const guest = turnNetwork(goodTurn, { user: { uid: 'guest', getIdToken: async () => 'token' }, host: false });
+  guest.N.open('room', false, 'host'); guest.N.setLanIp('192.168.1.34');
+  guest.offer(false); await settle();
+  guest.pcs[0].onicecandidate({ candidate: { toJSON: () => ({ candidate: HIDDEN }) } });
+  guest.pcs[0].onicecandidate({ candidate: null });
+  assert.deepEqual(guest.signals.at(-1)[1].sig.cs.map(c => c.candidate), [HIDDEN]);
+});
+
+test('same Wi-Fi: turning local mode on redoes the pairs that have not connected, and leaving the room turns it off', async () => {
+  const { N, pcs } = turnNetwork(goodTurn);
+  N.open('room', true, 'host'); N.syncMembers(['host', 'a', 'b']); await settle();
+  assert.equal(pcs.length, 2);
+  N.setLanIp('10.0.0.15'); await settle();
+  assert.equal(pcs.length, 4, 'both pairs start again with the local IP');
+  N.setLanIp('10.0.0.15'); await settle();
+  assert.equal(pcs.length, 4, 'the same IP again changes nothing');
+  N.setLanIp('8.8.8.8');
+  assert.equal(N.lanIp, null, 'a public IP is never used');
+  N.setLanIp('10.0.0.15'); N.close();
+  assert.equal(N.lanIp, null);
+});
+
+test('same Wi-Fi: two players behind the same router are spotted from their STUN candidates', async () => {
+  const { N, pcs, offer, deliver } = turnNetwork(goodTurn, { user: { uid: 'guest', getIdToken: async () => 'token' }, host: false });
+  N.open('room', false, 'host');
+  offer(false); await settle();
+  pcs[0].onicecandidate({ candidate: { toJSON: () => srflx('203.0.113.7') } });
+  deliver({ cs: [{ candidate: HIDDEN }, srflx('198.51.100.4')] }); await settle();
+  assert.equal(N.sameNetwork('host'), false, 'different public IP: different networks');
+  deliver({ cs: [srflx('203.0.113.7')] }); await settle();
+  assert.equal(N.sameNetwork('host'), true);
+  assert.equal(N.sameNetwork('nobody'), false);
+});
+
+test('same Wi-Fi: the room key is 24 characters of SHA-256, and another network gives another key', async () => {
+  const G = { DB: { onLeave() {} } };
+  new Function('G', source('js/net/social.js'))(G);
+  const k = await G.Social.lanKey('203.0.113.7', '192.168.1.20');
+  const want = require('node:crypto').createHash('sha256').update('203.0.113.7|192.168.1.20').digest('base64url').slice(0, 24);
+  assert.equal(k, want);
+  assert.match(k, /^[A-Za-z0-9_-]{24}$/);
+  assert.notEqual(await G.Social.lanKey('198.51.100.4', '192.168.1.20'), k, 'same local IP, other router: not found');
+  assert.notEqual(await G.Social.lanKey('203.0.113.7', '192.168.1.21'), k);
+});

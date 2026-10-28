@@ -10,8 +10,9 @@
  *     inv/{para_de}                { to, from, room, name, at } invitaciones
  *
  *   Realtime Database: SÓLO mientras estás en una sala o partida en grupo
- *     rooms/{id}          { host, open, at, m: { uid: { name, dex, shiny } }, q: ... }
- *                         la sala; q/ son los mensajes de net.js
+ *     rooms/{id}          { host, open, at, m: { uid: { name, dex, shiny } }, q: ..., lan? }
+ *                         la sala; q/ son los mensajes de net.js; lan, la clave de
+ *                         «Entrar por IP» (ver setLocal)
  *
  * Por qué así: el plan gratuito de Firebase sólo admite 100 conexiones a la
  * vez a la Realtime Database. Si todo el mundo estuviera conectado, ése sería
@@ -408,7 +409,7 @@ G.Social = (() => {
           const m = {};
           for (const x of room.members) m[x.uid] = { name: x.name, dex: x.dex, shiny: !!x.shiny, at: x.at || 0 };
           m[uid] = Object.assign(memberInfo(), m[uid] ? { at: m[uid].at } : {});
-          await within(base.set({ host: uid, open: playing ? false : room.open, at: ts(), m }), 5000);
+          await within(base.set(Object.assign({ host: uid, open: playing ? false : room.open, at: ts(), m }, room.lan ? { lan: room.lan } : {})), 5000);
         }
       } else {
         if (!host) throw Error('sin anfitrión');
@@ -486,6 +487,68 @@ G.Social = (() => {
   function refreshMember() {
     if (room && me) fb.rtdb.ref('rooms/' + room.id + '/m/' + uid).update(
       { dex: G.DB.save.partner, shiny: !!G.DB.save.partnerShiny && G.DB.ownsShiny(G.DB.save.partner) }).catch(() => {});
+  }
+
+  // ---------------- misma wifi ----------------
+  /*
+   * Salas locales (28-10-2026). En la misma wifi no se suele poder conectar sólo con
+   * STUN (ver net.js, lanCandidate): el anfitrión escribe su IP local y el juego la
+   * usa para conectar. Además la sala guarda rooms/{uid}/lan: 24 letras del SHA-256
+   * de «IP pública|IP local». Quien esté en la misma wifi (misma IP pública) y
+   * escriba esa IP la encuentra con una consulta exacta, sin ser amigos; desde otra
+   * red, la misma IP da otra clave y no encuentra nada. No queda ninguna IP legible.
+   * (La consulta necesita en database.rules.json el índice de lan y que sólo deje
+   * buscar así, de una en una.)
+   */
+  const BAD_IP = 'Esa no es una IP local. Empieza por 192.168., 10. o 172.16 a 172.31.';
+
+  async function lanKey(pub, ip) {
+    const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pub + '|' + ip)));
+    let s = '';
+    for (const b of h) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').slice(0, 24);
+  }
+
+  /**
+   * Anfitrión: pone su sala (la crea si hace falta) en modo misma wifi con su IP.
+   * La clave para «Entrar por IP» se escribe después, sin esperar (el STUN tarda).
+   */
+  async function setLocal(ip) {
+    ip = String(ip || '').trim();
+    if (!G.Net.isLocalIp(ip)) return { ok: false, error: BAD_IP };
+    if (room && !room.isHost) return { ok: false, error: 'Sólo el anfitrión de la sala puede hacerlo.' };
+    const r = room || await createRoom();
+    r.lanIp = ip;
+    emit('room');
+    G.Net.publicIp().then(async pub => {
+      if (!pub || room !== r || r.lanIp !== ip) return;
+      const key = await lanKey(pub, ip);
+      await fb.rtdb.ref('rooms/' + r.id + '/lan').set(key);
+      r.lan = key;
+    }).catch(() => { /* sin la clave sólo falla «Entrar por IP»: se puede invitar igual */ });
+    return { ok: true };
+  }
+
+  /** Busca la sala local con esa IP en esta wifi. -> { ok, room: { id, name, n } } */
+  async function findLocal(ip) {
+    ip = String(ip || '').trim();
+    if (!G.Net.isLocalIp(ip)) return { ok: false, error: BAD_IP };
+    const pub = await G.Net.publicIp();
+    if (!pub) return { ok: false, error: 'No se pudo comprobar tu red. Revisa la conexión y prueba otra vez.' };
+    let key;
+    try { key = await lanKey(pub, ip); }
+    catch (e) { return { ok: false, error: 'No se pudo comprobar tu red. Revisa la conexión y prueba otra vez.' }; }
+    rtOn();
+    let found = null;
+    try {
+      const s = await fb.rtdb.ref('rooms').orderByChild('lan').equalTo(key).limitToFirst(1).get();
+      s.forEach(c => { if (!found) found = { id: c.key, v: c.val() || {} }; });
+    } catch (e) { console.warn('[Social] buscar sala local:', e.message); }   // sin permiso o sin red: como si no hubiera
+    rtOff();
+    if (!found || !found.v.host) return { ok: false, error: 'No hay ninguna sala en ' + ip + ' en esta wifi. Revisa el número y que estéis en la misma red.' };
+    if (found.v.open !== true) return { ok: false, error: 'La partida de esa sala ya ha empezado.' };
+    const m = found.v.m || {};
+    return { ok: true, room: { id: found.id, name: (m[found.v.host] || {}).name || '', n: Object.keys(m).length } };
   }
 
   // ---------------- invitaciones ----------------
@@ -619,7 +682,7 @@ G.Social = (() => {
   return {
     start, stop, claimNick, request, accept, remove, publishProfile, getProfile, profileData,
     createRoom, joinRoom, leaveRoom, setOpen, refreshMember, dropMember, setPlaying, ensureFriends,
-    invite, acceptInvite, declineInvite,
+    invite, acceptInvite, declineInvite, setLocal, findLocal, lanKey,
     on(fn) { listeners.add(fn); }, off(fn) { listeners.delete(fn); },
     get me() { return me; },
     get started() { return started; },

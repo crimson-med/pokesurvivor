@@ -6,7 +6,10 @@
  * Cada línea en español y en inglés.
  */
 G.CHANGELOG = [
-  { d: '2026-10-28', title: ["Cooperativo en aparatos lentos", "Co-op on slower devices"], fix: [
+  { d: '2026-10-28', title: ["Cooperativo: aparatos lentos y misma wifi", "Co-op: slower devices and same Wi-Fi"], new: [
+    ["Cooperativo en la misma wifi: si dos jugadores en la misma red no conseguían conectar, ahora el anfitrión puede escribir su IP local (Amigos › Misma wifi, o «Conectar en local» en la sala cuando el juego ve que estáis en la misma wifi) y la conexión va directa. Y con «Entrar por IP», quien esté en tu wifi entra en tu sala sin tener que ser tu amigo.",
+     "Same Wi-Fi co-op: if two players on the same network couldn't connect, the host can now type their local IP (Friends › Same Wi-Fi, or \"Connect locally\" in the room when the game sees you're on the same Wi-Fi) and the connection goes direct. And with \"Join by IP\", anyone on your Wi-Fi can join your room without being your friend."]
+  ], fix: [
     ["Cooperativo: si un jugador iba a menos de 30 imágenes por segundo, su Pokémon se movía y atacaba a cámara lenta (y si era el anfitrión, toda la partida). Ahora el juego sigue al reloj de verdad, y los datos de la partida se mandan las 15 veces por segundo que tocan (antes salían algunas menos).",
      "Co-op: if a player was running below 30 frames per second, their Pokémon moved and attacked in slow motion (and if it was the host, the whole run did). Now the game follows the real clock, and the run data is sent the full 15 times per second (a few fewer went out before)."]
   ]},

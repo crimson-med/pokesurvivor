@@ -43,6 +43,11 @@ G.Net = (() => {
 
   let rtdb = null, uid = null, roomId = null, isHost = false, hostUid = null;
   let qref = null;
+  // Misma wifi (28-10-2026): IP local que ha escrito el anfitrión (ver lanCandidate).
+  // Y las IP públicas que salen en los candidatos srflx (STUN): las nuestras y las de
+  // cada jugador, para saber si una pareja que no conecta está detrás del mismo router.
+  let lanIp = null;
+  const myPub = new Set(), theirPub = new Map();   // uid -> Set
   const peers = new Map();         // uid -> { pc, dc, mode, timer }
   // Anfitrión: invitados con los que ya falló la vía directa. Se recuerda toda la
   // sesión (no sólo la sala) para no perder otra vez la espera sin TURN; y si ha
@@ -127,6 +132,99 @@ G.Net = (() => {
     peerHandlers.forEach(fn => { try { fn(u, p ? p.mode : 'closed'); } catch (e) { console.warn(e); } });
   }
 
+  // ---------------- misma wifi ----------------
+  /*
+   * Dos aparatos detrás del mismo router no suelen conectar sólo con STUN: los dos
+   * salen con la misma IP pública (y muchos routers no devuelven el tráfico hacia
+   * dentro) y el navegador esconde la IP local con un nombre «xxxx.local» que el
+   * otro tiene que resolver por mDNS (falla entre Windows y Mac, en wifis en malla
+   * o si el router corta la multidifusión). El nombre se esconde, pero el puerto
+   * no: si el anfitrión escribe su IP local, cada candidato «xxxx.local PUERTO typ
+   * host» sale además con esa IP, y el invitado llega directo. El anfitrión aprende
+   * la vía de vuelta con el primer paquete (candidato prflx). Una IP equivocada no
+   * rompe nada: esa pareja falla como cualquier otra.
+   */
+
+  /** ¿IPv4 privada (10/8, 172.16/12, 192.168/16)? Sólo esas: nunca una pública. */
+  function isLocalIp(ip) {
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(ip || '').trim());
+    if (!m || m.slice(1).some(n => +n > 255 || (n.length > 1 && n[0] === '0'))) return false;
+    const a = +m[1], b = +m[2];
+    return a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+  }
+
+  /** "candidate:… 1 udp 2122… dirección puerto typ tipo …" -> { proto, addr, type } */
+  function candParts(c) {
+    const t = String(c && c.candidate || '').replace(/^a=/, '').split(' ');
+    return t.length >= 8 && t[6] === 'typ' ? { t, proto: t[2].toLowerCase(), addr: t[4], type: t[7] } : null;
+  }
+
+  /** El mismo candidato con la IP local en vez del nombre .local, o null si no toca. */
+  function lanCandidate(c, ip) {
+    const p = candParts(c);
+    if (!p || !isLocalIp(ip) || p.proto !== 'udp' || p.type !== 'host' || !/\.local$/i.test(p.addr)) return null;
+    p.t[4] = ip.trim();
+    return Object.assign({}, c, { candidate: p.t.join(' ') });
+  }
+
+  /** Apunta la IP pública de un candidato srflx (de = null: nuestro). */
+  function notePub(c, from) {
+    const p = candParts(c);
+    if (!p || p.type !== 'srflx') return;
+    if (!from) { myPub.add(p.addr); return; }
+    if (!theirPub.has(from)) theirPub.set(from, new Set());
+    theirPub.get(from).add(p.addr);
+  }
+
+  /** ¿u y nosotros salimos a internet por la misma IP pública (mismo router)? */
+  function sameNetwork(u) {
+    const s = theirPub.get(u);
+    if (!s) return false;
+    for (const a of s) if (myPub.has(a)) return true;
+    return false;
+  }
+
+  /**
+   * Nuestra IP pública (IPv4) según el STUN de siempre, o null si no se consigue en
+   * unos segundos (sin red, o la red corta el STUN). Sólo hace falta para las salas
+   * locales (social.js): no se manda a ningún sitio más que al STUN.
+   */
+  function publicIp(wait = 4000) {
+    return new Promise(resolve => {
+      let pc, done = false;
+      const end = ip => {
+        if (done) return;
+        done = true; clearTimeout(t);
+        try { pc.close(); } catch (e) { /* nada */ }
+        if (ip) myPub.add(ip);
+        resolve(ip || null);
+      };
+      const t = setTimeout(() => end(null), wait);
+      try {
+        pc = new RTCPeerConnection({ iceServers: ICE });
+        pc.createDataChannel('ip');
+        pc.onicecandidate = e => {
+          if (!e.candidate) { end(null); return; }
+          const p = candParts(e.candidate);
+          if (p && p.type === 'srflx' && /^\d+\.\d+\.\d+\.\d+$/.test(p.addr)) end(p.addr);
+        };
+        pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => end(null));
+      } catch (e) { end(null); }
+    });
+  }
+
+  /**
+   * Anfitrión: activa (ip) o quita (null) la IP local. Las parejas que aún no han
+   * conectado se rehacen al momento, ya con ella.
+   */
+  function setLanIp(ip) {
+    const v = isLocalIp(ip) ? String(ip).trim() : null;
+    if (v === lanIp) return;
+    lanIp = v;
+    if (!isHost || !roomId || !lanIp) return;
+    for (const [u, p] of [...peers]) if (p.mode !== 'direct') { drop(u, true); connect(u); }
+  }
+
   // ---------------- apertura ----------------
 
   function open(id, host, hostId) {
@@ -159,6 +257,7 @@ G.Net = (() => {
     for (const u of [...peers.keys()]) drop(u);
     if (qref) { qref.off(); qref = null; }
     roomId = null; isHost = false; hostUid = null;
+    lanIp = null; theirPub.clear();
   }
 
   const turnFirst = u => needTurn.has(u) || needTurn.size >= 2;
@@ -196,7 +295,12 @@ G.Net = (() => {
     const flushIce = () => { clearTimeout(iceT); iceT = 0; if (iceOut.length && peers.get(u) === p) signal(u, { cs: iceOut.splice(0) }); };
     pc.onicecandidate = e => {
       if (!e.candidate) { flushIce(); return; }
-      iceOut.push(e.candidate.toJSON());
+      const c = e.candidate.toJSON();
+      notePub(c, null);
+      iceOut.push(c);
+      // Misma wifi: el anfitrión manda también su candidato con la IP local de verdad.
+      const lan = isHost && lanIp ? lanCandidate(c, lanIp) : null;
+      if (lan) iceOut.push(lan);
       if (iceOut.length >= ICE_MAX) flushIce();
       else if (!iceT) iceT = setTimeout(flushIce, ICE_BATCH);
     };
@@ -308,6 +412,7 @@ G.Net = (() => {
         if (p && p.pc) await p.pc.setRemoteDescription(sig.sdp);
       } else if (sig.c || Array.isArray(sig.cs)) {
         for (const c of sig.cs || [sig.c]) {
+          notePub(c, from);
           if (p && p.pc && p.pc.remoteDescription) await p.pc.addIceCandidate(c).catch(() => {});
           else { if (!pendingIce.has(from)) pendingIce.set(from, []); pendingIce.get(from).push(c); }
         }
@@ -386,6 +491,9 @@ G.Net = (() => {
     mode(u) { const p = peers.get(u); return p ? p.mode : 'closed'; },
     /** ¿Conectado pero pasando por el TURN propio? */
     viaTurn(u) { const p = peers.get(u); return !!(p && p.mode === 'direct' && p.viaTurn); },
+    // Misma wifi (ver lanCandidate).
+    setLanIp, publicIp, sameNetwork, isLocalIp, lanCandidate,
+    get lanIp() { return lanIp; },
     /** ¿Va por el relé (o no hay conexión)? Entonces se manda menos a menudo. */
     slow(u) { const p = peers.get(u); return !p || p.mode !== 'direct'; },
     /** ¿Le queda mucho por salir? Entonces mejor esperar que mandar más (ver BUSY_BYTES). */

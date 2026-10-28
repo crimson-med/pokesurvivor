@@ -656,6 +656,22 @@ input[type=range]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 
 .lob-card .conn.wait { color: var(--gold); }
 .lob-card.empty { border-style: dashed; border-color: rgba(244,248,255,.18); color: var(--muted); }
 
+/* Misma wifi (sala local) */
+#fr-lan .row .field { min-width: 160px; }
+.lan-link { appearance: none; background: none; border: 0; padding: 0; margin-top: 8px; cursor: pointer;
+  color: var(--gold); font-size: 14px; text-decoration: underline; text-shadow: none; }
+.lan-help { margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: rgba(0,0,0,.22);
+  color: var(--muted); font-size: 13px; line-height: 1.5; }
+.lan-help b { color: var(--ink); }
+.box .lan-h { margin: 18px 0 6px; }
+.lobby-lan { margin: -6px 0 6px; }
+.lobby-lan .lan-ip { font-size: 30px; font-weight: 700; color: var(--gold); letter-spacing: 1px; }
+.lobby-hint { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 14px;
+  background: rgba(255,210,63,.12); border: 2px solid rgba(255,210,63,.55); }
+.lobby-hint .row { margin-top: 8px; gap: 8px; }
+.lobby-hint .field { flex: 1; min-width: 140px; padding: 6px 10px; font-size: 15px; }
+.lobby-hint .err:empty { display: none; }
+
 .invite-pop {
   position: fixed; right: 18px; bottom: 54px; z-index: 70; width: min(340px, calc(100% - 32px));
   padding: 14px 16px; animation: pop .2s ease-out;
