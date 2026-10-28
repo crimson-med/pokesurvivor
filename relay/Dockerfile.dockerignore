@@ -1,0 +1,6 @@
+# La imagen se construye desde la raíz: sólo entra lo que usa el servidor.
+*
+!relay/package.json
+!relay/package-lock.json
+!relay/*.js
+!js/data/room-words.js
