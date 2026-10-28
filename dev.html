@@ -369,6 +369,27 @@
       <div class="tab on" data-tab="online">En línea</div>
       <div class="tab" data-tab="lan">Misma wifi</div>
     </div>
+    <!-- Servidor propio (sólo con ?relay): crear sala o entrar con código (social-ui.js) -->
+    <div id="fr-code" class="fr-code hidden">
+      <h3>Crear sala</h3>
+      <div class="chips code-mode" id="code-mode">
+        <button type="button" class="chip on" data-mode="direct"><b>Directa primero</b><small>Lo más rápido. Sólo usa el servidor si hace falta.</small></button>
+        <button type="button" class="chip" data-mode="server"><b>Siempre por el servidor</b><small>Los demás jugadores no ven tu IP.</small></button>
+      </div>
+      <button id="code-create" class="btn gold" type="button" data-sfx="confirm">Crear sala</button>
+      <h3 class="lan-h">Entrar con código</h3>
+      <form id="code-join" class="row" autocomplete="off">
+        <div class="code-inputs">
+          <input class="field" list="code-dl" maxlength="60" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" placeholder="Pokémon" aria-label="Pokémon 1">
+          <input class="field" list="code-dl" maxlength="60" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" placeholder="Pokémon" aria-label="Pokémon 2">
+          <input class="field" list="code-dl" maxlength="60" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" placeholder="Pokémon" aria-label="Pokémon 3">
+          <input class="field" list="code-dl" maxlength="60" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" placeholder="Pokémon" aria-label="Pokémon 4">
+        </div>
+        <datalist id="code-dl" translate="no"></datalist>
+        <button class="btn gold" type="submit">Unirme</button>
+      </form>
+      <p id="code-msg" class="note"></p>
+    </div>
     <div id="fr-online">
       <p class="sub" id="fr-me"></p>
       <form id="fr-add" class="row" autocomplete="off">
@@ -412,6 +433,7 @@
     <div class="row between"><h2>Sala</h2>
       <div class="row"><button id="lobby-menu" class="btn small ghost">Menú</button><button id="lobby-leave" class="btn small ghost">Salir de la sala</button></div></div>
     <p class="sub" id="lobby-sub"></p>
+    <div id="lobby-code" class="lobby-code hidden"></div>
     <div id="lobby-lan" class="lobby-lan hidden"></div>
     <div id="lobby-members" class="lobby-members"></div>
     <div id="lobby-hint" class="lobby-hint hidden"></div>
