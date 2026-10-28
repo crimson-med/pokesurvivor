@@ -164,7 +164,10 @@ G.SettingsUI = (() => {
       + `<div class="row wrap" style="gap:8px;margin-top:12px">
            <button class="btn" id="set-logout">Cerrar sesión</button>
            <button class="btn danger" id="set-delete">Borrar cuenta</button>
-         </div><p class="note" id="set-msg"></p>`;
+         </div><p class="note" id="set-msg"></p>`
+      // Cooperativo con servidor propio (sólo con ?relay): ir siempre por el servidor.
+      + (G.Relay && G.Relay.enabled ? section('Cooperativo')
+          + toggle('coopHideIp', 'Ocultar mi IP en cooperativo', 'Juegas siempre por el servidor: los demás jugadores no ven tu IP.') : '');
   }
 
   function wire(box) {
