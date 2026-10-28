@@ -590,3 +590,384 @@ test('same Wi-Fi: the room key is 24 characters of SHA-256, and another network 
   assert.notEqual(await G.Social.lanKey('198.51.100.4', '192.168.1.20'), k, 'same local IP, other router: not found');
   assert.notEqual(await G.Social.lanKey('203.0.113.7', '192.168.1.21'), k);
 });
+
+// ---------------- servidor del cooperativo (?relay): G.Relay falso en memoria ----------------
+// Reloj falso compartido: advance(ms) ejecuta en orden los temporizadores que vencen.
+function fakeClock() {
+  let now = 0, id = 0; const ts = new Map();
+  return {
+    setTimeout: (fn, ms) => { ts.set(++id, { fn, at: now + (ms || 0) }); return id; },
+    clearTimeout: i => ts.delete(i),
+    async advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        let next = null;
+        for (const [i, t] of ts) if (t.at <= end && (!next || t.at < next[1].at)) next = [i, t];
+        if (!next) break;
+        ts.delete(next[0]); now = next[1].at; next[1].fn(); await settle();
+      }
+      now = end;
+    }
+  };
+}
+// Canal de datos falso: lo mandado llega al otro al momento, salvo con hold (se queda
+// «de camino» y se pierde si el canal se corta).
+function dcPair() {
+  const mk = () => ({ readyState: 'connecting', bufferedAmount: 0, hold: false, inFlight: [],
+    send(data) {
+      if (this.readyState !== 'open') throw Error('not open');
+      if (this.hold) this.inFlight.push(data); else if (this.peer.onmessage) this.peer.onmessage({ data });
+    },
+    open() { for (const d of [this, this.peer]) d.readyState = 'open'; for (const d of [this, this.peer]) if (d.onopen) d.onopen(); },
+    close() {
+      if (this.readyState === 'closed') return;
+      for (const d of [this, this.peer]) { d.readyState = 'closed'; d.inFlight.length = 0; }
+      for (const d of [this, this.peer]) if (d.onclose) d.onclose();
+    } });
+  const a = mk(), b = mk(); a.peer = b; b.peer = a;
+  return [a, b];
+}
+/*
+ * Un servidor falso que une varios jugadores: reenvía 'sig' y 'm' con el remitente,
+ * lleva los 'ack' al anfitrión y apunta los 'path'. direct: false = el canal directo
+ * no abre nunca. holdAcks: los ack se quedan en el servidor (releaseAcks los suelta).
+ */
+function relayWorld({ mode = 'direct', directWaitMs = 6000, direct = true, members = {} } = {}) {
+  const clk = fakeClock(), pcs = [], nodes = new Map(), log = [], rtdbRefs = [];
+  const w = { clk, pcs, log, rtdbRefs, direct, holdAcks: false, heldAcks: [], dropAcks: false, holdM: false, heldM: [],
+    room: { code: [1, 2, 3, 4], state: 'lobby', mode, host: 'host', directWaitMs, members: [] } };
+  const deliver = (to, ev, ...args) => Promise.resolve().then(() => { const n = nodes.get(to); if (n) n.fire(ev, ...args); });
+  w.releaseAcks = () => { for (const [from, seq] of w.heldAcks.splice(0)) nodes.get('host').fire('ack', from, seq); };
+  w.releaseM = () => { for (const a of w.heldM.splice(0)) deliver(...a); };
+  function fakeRelay(uid) {
+    const fns = new Map();
+    return { enabled: true, state: 'online', uid, get room() { return w.room; }, connect() {}, request: async () => ({ ok: true }),
+      on(ev, fn) { if (!fns.has(ev)) fns.set(ev, new Set()); fns.get(ev).add(fn); },
+      off(ev, fn) { if (fns.has(ev)) fns.get(ev).delete(fn); },
+      fire(ev, ...args) { for (const fn of [...(fns.get(ev) || [])]) fn(...args); },
+      listeners: ev => (fns.get(ev) || new Set()).size,
+      emit(ev, ...args) {
+        log.push([uid, ev, ...args]);
+        if (ev === 'sig') deliver(args[0], 'sig', uid, JSON.parse(JSON.stringify(args[1])));
+        else if (ev === 'm') { if (w.holdM) w.heldM.push([args[0], 'm', uid, args[1], args[2]]); else deliver(args[0], 'm', uid, args[1], args[2]); }
+        else if (ev === 'ack') {
+          if (w.dropAcks) return;
+          if (w.holdAcks) w.heldAcks.push([uid, args[0]]); else deliver('host', 'ack', uid, args[0]);
+        } else if (ev === 'path') {
+          const m = w.room.members.find(x => x.uid === args[0]);
+          if (m && m.path !== args[1]) { m.path = args[1]; for (const u of nodes.keys()) deliver(u, 'room', w.room); }
+        }
+      } };
+  }
+  function PCFor(owner) {
+    return class PC {
+      constructor(cfg) { this.cfg = cfg; this.owner = owner; this.id = pcs.length; pcs.push(this); this.added = []; }
+      createDataChannel() { const [a, b] = dcPair(); this.dc = a; this.far = b; return a; }
+      createOffer() { return Promise.resolve({ type: 'offer', sdp: 'pc' + this.id }); }
+      createAnswer() { return Promise.resolve({ type: 'answer', sdp: 'pc' + this.id }); }
+      setLocalDescription(d) { this.localDescription = { toJSON: () => d }; return Promise.resolve(); }
+      setRemoteDescription(d) {
+        this.remoteDescription = d;
+        if (d.type === 'answer' && w.direct) {
+          const g = pcs[+d.sdp.slice(2)];
+          Promise.resolve().then(() => { if (!this.closed && !g.closed) { g.ondatachannel({ channel: this.far }); this.dc.open(); } });
+        }
+        return Promise.resolve();
+      }
+      addIceCandidate(c) { this.added.push(c); return Promise.resolve(); }
+      close() { this.closed = true; }
+    };
+  }
+  w.add = uid => {
+    w.room.members.push({ uid, name: uid, dex: 25, shiny: false, online: true, path: null, sameNet: false, hideIp: false, ...members[uid] });
+    const relay = fakeRelay(uid);
+    const G = { NetCodec: codec(), Relay: relay, DB: { fb: { uid, rtdb: { ref: p => {
+      rtdbRefs.push(p); return { on() {}, off() {}, set: () => { rtdbRefs.push('set ' + p); return Promise.resolve(); } };
+    } } } } };
+    new Function('G', 'RTCPeerConnection', 'setTimeout', 'clearTimeout', source('js/net/net.js'))(G, PCFor(uid), clk.setTimeout, clk.clearTimeout);
+    nodes.set(uid, relay);
+    const got = [], states = [];
+    G.Net.on((from, msg) => got.push([from, msg]));
+    G.Net.onPeer((u, s) => states.push([u, s]));
+    return { N: G.Net, relay, got, states };
+  };
+  return w;
+}
+async function relayPair(opts) {
+  const w = relayWorld(opts);
+  const host = w.add('host'), guest = w.add('g');
+  guest.N.open('room', false, 'host');
+  host.N.open('room', true, 'host');
+  host.N.syncMembers(['host', 'g']);
+  await settle();
+  return { w, host, guest };
+}
+const paths = w => w.log.filter(e => e[1] === 'path').map(e => [e[2], e[3]]);
+const numbered = i => frame(5, 2, i);
+const tOf = msg => Math.round(msg.t - 1200.25);
+
+test('relay: host and guest reach direct over socket signaling, with no Realtime Database use at all', async () => {
+  const { w, host, guest } = await relayPair();
+  assert.equal(host.N.mode('g'), 'direct');
+  assert.equal(guest.N.mode('host'), 'direct');
+  assert.deepEqual(paths(w), [['g', 'direct']], 'the host reports the path');
+  assert.deepEqual(w.rtdbRefs, [], 'no rooms/<id>/q reads or writes');
+  assert.ok(w.log.some(([u, ev, to, sig]) => u === 'host' && ev === 'sig' && to === 'g' && sig.sdp.type === 'offer'));
+  assert.ok(w.log.some(([u, ev, to, sig]) => u === 'g' && ev === 'sig' && to === 'host' && sig.sdp.type === 'answer'));
+  assert.ok(w.pcs.every(pc => pc.cfg.iceServers.length === 1), 'no TURN with the relay');
+  host.N.send('g', numbered(1)); guest.N.toHost(client());
+  assert.deepEqual(guest.got.map(([f, m]) => [f, tOf(m)]), [['host', 1]]);
+  assert.deepEqual(host.got, [['g', client()]]);
+  assert.ok(!w.log.some(e => e[1] === 'm'), 'nothing through the server while direct');
+  host.N.close(); guest.N.close();
+  for (const n of [host, guest]) for (const ev of ['sig', 'm', 'ack', 'peer', 'room', 'state']) assert.equal(n.relay.listeners(ev), 0, ev);
+});
+
+test('relay: connection candidates still go together, one { cs } per 250 ms, and only the host adds the local IP copy', async () => {
+  const { w, host } = await relayPair({ direct: false });
+  host.N.setLanIp('192.168.1.20'); await settle();      // rehace la pareja, ya con la IP
+  const hpc = w.pcs.filter(pc => pc.owner === 'host').at(-1), gpc = w.pcs.filter(pc => pc.owner === 'g').at(-1);
+  const cs = (from) => w.log.filter(e => e[0] === from && e[1] === 'sig' && e[3].cs).map(e => e[3].cs);
+  for (const pc of [hpc, gpc]) {
+    pc.onicecandidate({ candidate: { toJSON: () => ({ candidate: HIDDEN }) } });
+    pc.onicecandidate({ candidate: { toJSON: () => srflx('203.0.113.7') } });
+  }
+  await w.clk.advance(249);
+  assert.equal(cs('host').length + cs('g').length, 0, 'they wait to go together');
+  await w.clk.advance(1);
+  assert.equal(cs('host').length, 1); assert.equal(cs('g').length, 1);
+  assert.deepEqual(cs('host')[0].map(c => c.candidate), [HIDDEN, HIDDEN.replace(/\S+\.local/, '192.168.1.20'), srflx('203.0.113.7').candidate]);
+  assert.deepEqual(cs('g')[0].map(c => c.candidate), [HIDDEN, srflx('203.0.113.7').candidate]);
+  await settle();
+  assert.equal(gpc.added.length, 3, 'the guest adds what the host sent');
+  assert.deepEqual(w.rtdbRefs, []);
+});
+
+test('relay: direct never opens, so after directWaitMs the pair plays through the server', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  assert.equal(host.N.mode('g'), 'connecting'); assert.equal(host.N.slow('g'), true);
+  await w.clk.advance(5999);
+  assert.equal(host.N.mode('g'), 'connecting');
+  await w.clk.advance(1);
+  assert.equal(host.N.mode('g'), 'relay'); assert.equal(guest.N.mode('host'), 'relay');
+  assert.deepEqual(paths(w), [['g', 'server']]);
+  assert.equal(host.N.slow('g'), false, 'the server keeps the normal rate');
+  assert.equal(guest.N.slow('host'), false);
+  host.N.send('g', numbered(1)); host.N.send('g', { k: 'start', seed: 7 }); guest.N.toHost(client());
+  await settle();
+  assert.deepEqual(guest.got.map(([f, m]) => [f, m.k]), [['host', 'f'], ['host', 'start']]);
+  assert.deepEqual(guest.got[0][1], numbered(1));
+  assert.deepEqual(host.got, [['g', client()]]);
+  const ms = w.log.filter(e => e[1] === 'm');
+  assert.deepEqual(ms.map(e => [e[0], e[2], e[3]]), [['host', 'g', 1], ['host', 'g', 2], ['g', 'host', 1]]);
+  assert.ok(ms[0][4] instanceof ArrayBuffer, 'frames go as binary'); assert.equal(typeof ms[1][4], 'string');
+  assert.ok(w.pcs.every(pc => pc.closed), 'no WebRTC left open');
+  assert.deepEqual(w.rtdbRefs, []);
+  assert.ok(!host.states.some(([, s]) => s === 'failed'));
+});
+
+test('relay: a guest that never gets an offer goes through the server after directWaitMs + 3 s', async () => {
+  const w = relayWorld();
+  const guest = w.add('g');
+  guest.N.open('room', false, 'host'); await settle();
+  await w.clk.advance(8999);
+  assert.equal(guest.N.mode('host'), 'connecting');
+  await w.clk.advance(1);
+  assert.equal(guest.N.mode('host'), 'relay');
+});
+
+test('relay: a guest on the same network gets 10 s instead of 6 s', async () => {
+  const { w, host, guest } = await relayPair({ direct: false, members: { g: { sameNet: true } } });
+  assert.equal(host.N.sameNetwork('g'), true); assert.equal(guest.N.sameNetwork('host'), true);
+  await w.clk.advance(9999);
+  assert.equal(host.N.mode('g'), 'connecting');
+  await w.clk.advance(1);
+  assert.equal(host.N.mode('g'), 'relay');
+  const other = await relayPair({ direct: false, directWaitMs: 3000 });
+  assert.equal(other.host.N.sameNetwork('g'), false);
+  await other.w.clk.advance(3000);
+  assert.equal(other.host.N.mode('g'), 'relay', 'the server can shorten the wait');
+});
+
+test('relay: "hide my IP" and "always through server" never offer WebRTC', async () => {
+  for (const opts of [{ members: { g: { hideIp: true } } }, { mode: 'server' }]) {
+    const { w, host, guest } = await relayPair(opts);
+    assert.equal(host.N.mode('g'), 'relay'); assert.equal(guest.N.mode('host'), 'relay');
+    assert.deepEqual(paths(w), [['g', 'server']], 'reported at once');
+    assert.equal(w.pcs.length, 0, 'no RTCPeerConnection on either side');
+    assert.ok(!w.log.some(e => e[1] === 'sig'));
+    guest.relay.fire('sig', 'host', { sdp: { type: 'offer', sdp: 'pc0' } }); await settle();
+    assert.equal(w.pcs.length, 0, 'the guest does not answer an offer either');
+    host.N.send('g', numbered(3)); await settle();
+    assert.equal(tOf(guest.got[0][1]), 3);
+  }
+});
+
+test('relay: a guest that asks to hide the IP while connecting moves to the server at once', async () => {
+  const { w, host } = await relayPair({ direct: false });
+  w.room.members.find(m => m.uid === 'g').hideIp = true;
+  host.relay.fire('room', w.room);
+  assert.equal(host.N.mode('g'), 'relay');
+  assert.deepEqual(paths(w), [['g', 'server']]);
+});
+
+test('relay: the direct channel dies mid-run; 100 numbered frames arrive once each, in order', async () => {
+  const { w, host, guest } = await relayPair();
+  const hdc = w.pcs.find(pc => pc.owner === 'host').dc;
+  for (let i = 1; i <= 45; i++) host.N.send('g', numbered(i));
+  hdc.hold = true;                                      // 46..50 se quedan de camino
+  for (let i = 46; i <= 50; i++) host.N.send('g', numbered(i));
+  assert.ok(host.N.stats.binarySent > 0, 'numbered frames still go as binary');
+  hdc.close();                                          // y se pierden
+  assert.equal(host.N.mode('g'), 'relay');
+  assert.deepEqual(paths(w), [['g', 'direct'], ['g', 'server']]);
+  for (let i = 51; i <= 100; i++) host.N.send('g', numbered(i));
+  await settle();
+  assert.deepEqual(guest.got.map(([, m]) => tOf(m)), Array.from({ length: 100 }, (_, i) => i + 1));
+  assert.deepEqual(guest.got.map(([, m]) => m), Array.from({ length: 100 }, (_, i) => numbered(i + 1)));
+  // y al revés: lo que el invitado mandó por el directo no se repite
+  guest.N.toHost(client()); await settle();
+  assert.equal(host.got.length, 1);
+});
+
+test('relay: busy turns true past 64 KB not acked on the server path, and false after the ack', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  for (let i = 0; i < 5; i++) host.N.send('g', numbered(i));
+  await settle();                                       // la primera confirmación: el servidor las reenvía
+  w.holdAcks = true;
+  let total = 0, n = 0;
+  while (!host.N.busy('g')) {
+    assert.ok(total <= 64 * 1024, 'not busy up to 64 KB');
+    host.N.send('g', frame(600, 400, n++));
+    const b = w.log.at(-1)[4];
+    total += typeof b === 'string' ? Buffer.byteLength(b) : b.byteLength;
+    assert.ok(n < 100);
+  }
+  assert.ok(total > 64 * 1024);
+  await settle(); await w.clk.advance(1000);           // el invitado confirma lo que tiene
+  assert.equal(host.N.busy('g'), true, 'still busy while the ack is on its way');
+  w.releaseAcks();
+  assert.equal(host.N.busy('g'), false);
+  assert.equal(guest.N.busy('host'), false, 'the guest never waits for acks');
+});
+
+test('relay: a server that never passes acks on never leaves the host stuck busy', async () => {
+  const { w, host } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  w.dropAcks = true;
+  for (let i = 0; i < 30; i++) host.N.send('g', frame(600, 400, i));
+  await settle();
+  assert.equal(host.N.busy('g'), false);
+});
+
+test('relay: a message sent through the server while connecting that arrives after a later direct one is still delivered, once', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  w.holdM = true;
+  host.N.send('g', { k: 'start', seed: 1 });            // seq 1, por el servidor (aún conectando)
+  await settle();
+  assert.equal(guest.N.mode('host'), 'connecting', 'a server message while connecting does not give up on direct');
+  const hpc = w.pcs.find(pc => pc.owner === 'host'), gpc = w.pcs.find(pc => pc.owner === 'g');
+  gpc.ondatachannel({ channel: hpc.far }); hpc.dc.open();
+  assert.equal(host.N.mode('g'), 'direct');
+  host.N.send('g', numbered(2));                        // seq 2, por el canal: llega antes
+  guest.relay.fire('m', 'host', 2, JSON.stringify(numbered(2)));   // repetido con el hueco aún abierto
+  assert.equal(guest.got.length, 1);
+  w.releaseM(); await settle();
+  assert.deepEqual(guest.got.map(([, m]) => m.k), ['f', 'start']);
+  guest.relay.fire('m', 'host', 1, JSON.stringify({ k: 'start', seed: 1 }));
+  guest.relay.fire('m', 'host', 2, JSON.stringify(numbered(2)));
+  assert.equal(guest.got.length, 2, 'repeats are dropped');
+  guest.relay.fire('m', 'nobody', 3, JSON.stringify(numbered(3)));
+  guest.relay.fire('m', 'host', 1e9, JSON.stringify(numbered(3)));
+  assert.equal(guest.got.length, 2, 'other senders and absurd numbers too');
+});
+
+test('relay: the guest moves to the server as soon as the host reports that path', async () => {
+  const { w, guest } = await relayPair({ direct: false, directWaitMs: 3000 });
+  w.room.members.find(m => m.uid === 'g').sameNet = true;    // el invitado esperaría 5 s
+  w.room.members.find(m => m.uid === 'g').path = 'server';
+  guest.relay.fire('room', w.room);
+  assert.equal(guest.N.mode('host'), 'relay');
+});
+
+test('relay: the host waits for a guest to show up in the server room before offering', async () => {
+  const w = relayWorld({ direct: false });
+  const host = w.add('host');
+  host.N.open('room', true, 'host'); host.N.syncMembers(['host', 'g', 'late']); await settle();
+  assert.equal(w.pcs.length, 0, 'no offer to someone the server has not listed');
+  assert.equal(host.N.mode('g'), 'connecting');
+  w.room.members.push({ uid: 'g', online: true, path: null, sameNet: false, hideIp: false });
+  host.relay.fire('room', w.room); await settle();
+  assert.equal(w.pcs.length, 1);
+  assert.ok(w.log.some(e => e[1] === 'sig' && e[2] === 'g' && e[3].sdp));
+  await w.clk.advance(6000);
+  assert.equal(host.N.mode('late'), 'relay', 'never listed: through the server');
+});
+
+test('relay: after our own socket drops, what went through the server meanwhile goes again', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  host.relay.fire('state', 'offline');
+  w.holdM = true; host.N.send('g', numbered(1)); w.heldM.length = 0;   // se pierde
+  w.holdM = false;
+  host.relay.fire('state', 'online'); await settle();
+  assert.deepEqual(guest.got.map(([, m]) => tOf(m)), [1]);
+  host.relay.fire('state', 'online'); await settle();
+  assert.equal(guest.got.length, 1);
+});
+
+test('relay: the server drops what goes to someone offline; when they come back it goes again, even before the pair settles', async () => {
+  for (const settled of [true, false]) {
+    const { w, host, guest } = await relayPair({ direct: false });
+    if (settled) await w.clk.advance(6000);
+    host.relay.fire('peer', 'g', 'away', 17);             // (el número de más del servidor se ignora)
+    w.holdM = true; host.N.send('g', numbered(1)); host.N.send('g', numbered(2)); w.heldM.length = 0;
+    w.holdM = false;
+    host.relay.fire('peer', 'g', 'online', 18); await settle();
+    assert.deepEqual(guest.got.map(([, m]) => tOf(m)), [1, 2], settled ? 'relay' : 'connecting');
+  }
+});
+
+test('relay: the guest acks every 5 messages, and within a second while messages arrive', async () => {
+  const { w, host } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  for (let i = 1; i <= 12; i++) host.N.send('g', numbered(i));
+  await settle();
+  const acks = () => w.log.filter(e => e[1] === 'ack').map(e => [e[0], e[2]]);
+  assert.deepEqual(acks(), [['g', 5], ['g', 10]]);
+  await w.clk.advance(999);
+  assert.equal(acks().length, 2);
+  await w.clk.advance(1);
+  assert.deepEqual(acks().at(-1), ['g', 12]);
+  await w.clk.advance(5000);
+  assert.equal(acks().length, 3, 'no acks when nothing arrives');
+});
+
+test('relay: a player dropping for a moment is away (slow), comes back, and gone closes the pair', async () => {
+  const { host } = await relayPair({ direct: false });
+  host.relay.fire('peer', 'g', 'away');
+  assert.equal(host.N.mode('g'), 'away'); assert.equal(host.N.slow('g'), true);
+  host.relay.fire('peer', 'g', 'online');
+  assert.equal(host.N.mode('g'), 'connecting');
+  host.relay.fire('peer', 'g', 'gone');
+  assert.equal(host.N.mode('g'), 'closed');
+  assert.deepEqual(host.states.map(([, s]) => s).slice(-3), ['away', 'connecting', 'closed']);
+});
+
+test('relay: with G.Relay present but not enabled, signaling still goes through the database as today', async () => {
+  const writes = [], G = { NetCodec: codec(), Relay: { enabled: false, on: () => assert.fail('on'), emit: () => assert.fail('emit') },
+    DB: { fb: { uid: 'host', rtdb: { ref: p => ({ on() {}, off() {}, set: s => { writes.push([slotted(p), JSON.parse(s)]); return Promise.resolve(); } }) } } } };
+  class PC {
+    constructor(cfg) { this.cfg = cfg; }
+    createDataChannel() { return { readyState: 'connecting', send() {}, close() {} }; }
+    createOffer() { return Promise.resolve({ type: 'offer' }); }
+    setLocalDescription(d) { this.localDescription = { toJSON: () => d }; return Promise.resolve(); }
+    close() {}
+  }
+  const timers = [];
+  new Function('G', 'RTCPeerConnection', 'setTimeout', 'clearTimeout', source('js/net/net.js'))(G, PC, (fn, ms) => timers.push(ms), () => {});
+  G.Net.open('room', true, 'host'); G.Net.syncMembers(['host', 'a']); await settle();
+  assert.deepEqual(writes.map(([p, m]) => [p, m.sig.sdp.type]), [['rooms/room/q/a', 'offer']]);
+  assert.equal(timers.at(-1), 9000);
+});
