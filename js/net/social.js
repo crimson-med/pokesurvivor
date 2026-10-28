@@ -1,4 +1,4 @@
-/* ============ social.js — apodo, amigos, invitaciones y salas ============
+/* ============ social.js: apodo, amigos, invitaciones y salas ============
  * Sólo funciona con cuenta en la nube (G.DB.online). Usa:
  *
  *   Firestore
@@ -7,12 +7,20 @@
  *     friendships/{uidA_uidB}      { users, from, to, status: 'pending'|'ok', names, at }
  *
  *     pres/{uid}                   (el "en línea", quitado el 20-10-2026: sólo se borra con la cuenta)
- *     inv/{para_de}                { to, from, room, name, at } invitaciones
+ *     inv/{para_de}                { to, from, room, code?, name, at } invitaciones
+ *                                  (code: el código de la sala, sólo con el servidor propio)
  *
  *   Realtime Database: SÓLO mientras estás en una sala o partida en grupo
  *     rooms/{id}          { host, open, at, m: { uid: { name, dex, shiny } }, q: ..., lan? }
  *                         la sala; q/ son los mensajes de net.js; lan, la clave de
  *                         «Entrar por IP» (ver setLocal)
+ *
+ *   Servidor propio (G.Relay, sólo con ?relay; docs/relay-coop, paso 4)
+ *     La sala vive en el servidor y es él quien manda en ella: crear, entrar,
+ *     salir, empezar y acabar son eventos del socket, y la lista llega en el
+ *     evento 'room'. Entonces no se toca la Realtime Database (ni rooms/ ni rin/).
+ *     La sala se llama por su código: cuatro números de la Pokédex en orden
+ *     (room.id = '25-95-151-133'). Ver «salas en el servidor» más abajo.
  *
  * Por qué así: el plan gratuito de Firebase sólo admite 100 conexiones a la
  * vez a la Realtime Database. Si todo el mundo estuviera conectado, ése sería
@@ -50,8 +58,10 @@ G.Social = (() => {
   let listening = false, unInv = null;  // listening: ya se ha puesto en marcha (online)
   const sentInv = new Map();        // a quién invitaste: uid -> { room, at } (para retirarlo al salir)
   let room = null;                  // { id, host, isHost, members: [{ uid, name, dex, shiny }] }
+                                    // (con el servidor, además relay, code, mode, state y, por
+                                    // jugador, online, path, sameNet, hideIp: ver fromSnap)
   let roomRefs = [];
-  const invites = new Map();        // fromUid -> { from, name, room, at }
+  const invites = new Map();        // fromUid -> { from, name, room, code?, at }
   const listeners = new Set();
   let started = false;
 
@@ -163,6 +173,7 @@ G.Social = (() => {
   const presKey = () => 'ps.pres.' + uid;    // (sólo para borrar lo que quedó de entonces)
   function setPlaying(p) {
     playing = !!p;
+    if (room && room.relay) relayRun(playing);
     // Al acabar la partida, la sala se vuelve a comprobar (los que se fueron, fuera).
     if (!playing && room) { if (room.lost) room.tries = 0; emit('room'); }
   }
@@ -273,10 +284,12 @@ G.Social = (() => {
 
   // ---------------- salas ----------------
 
-  function memberInfo() {
+  /** Tu apodo y tu Pokémon, como se ven en la sala. */
+  function pokeInfo() {
     const s = G.DB.save;
-    return { name: me.name, dex: s.partner, shiny: !!s.partnerShiny && G.DB.ownsShiny(s.partner), at: ts() };
+    return { name: me ? me.name : '', dex: s.partner, shiny: !!s.partnerShiny && G.DB.ownsShiny(s.partner) };
   }
+  function memberInfo() { return Object.assign(pokeInfo(), { at: ts() }); }
 
   /**
    * La Realtime Database sólo se conecta mientras estás en una sala: cada
@@ -297,8 +310,10 @@ G.Social = (() => {
    */
   const rinRef = (id, u = uid) => fb.rtdb.ref('rin/' + id + '/' + u);
 
-  async function createRoom() {
+  /** opts (sólo con el servidor): { mode: 'direct' | 'server' } o el modo tal cual. */
+  async function createRoom(opts) {
     if (room) return room;
+    if (relayOn()) return creating || (creating = relayCreate(opts).finally(() => { creating = null; }));
     rtOn();
     const id = uid;
     await fb.rtdb.ref('rooms/' + id).set({ host: uid, open: true, at: ts(), m: { [uid]: memberInfo() } });
@@ -307,6 +322,7 @@ G.Social = (() => {
   }
 
   async function joinRoom(id) {
+    if (relayOn()) return relayJoin(id);
     if (room && room.id === id) return { ok: true };
     if (room) await leaveRoom();
     rtOn();
@@ -452,21 +468,37 @@ G.Social = (() => {
 
   /** Anfitrión: quita a alguien de la sala (se cortó en partida y no volvió). */
   function dropMember(u) {
+    if (room && room.relay) {
+      if (room.isHost && u !== uid) G.Relay.request('kick', { uid: u }).catch(e => console.warn('[Social] kick:', e.code || e.message));
+      return;
+    }
     if (room && room.isHost && u !== uid) fb.rtdb.ref('rooms/' + room.id + '/m/' + u).remove().catch(() => {});
   }
 
   function closedRoom() {
     if (!room) return;
-    detachRoom();
+    const r = room;
+    if (!r.relay) detachRoom();
     room = null;
     retractInvites();
-    rtOff();
+    if (!r.relay) rtOff();
     emit('room-closed');
   }
 
   async function leaveRoom() {
+    if (!room && creating) { relayGen++; return; }      // aún creándose: se deshace al llegar la respuesta
     if (!room) return;
     const r = room;
+    if (r.relay) {
+      relayGen++;
+      room = null;
+      // Sin esperar la respuesta: el socket manda los eventos en orden (un join
+      // después llega detrás) y, sin conexión, el servidor libera la plaza solo.
+      G.Relay.request('leave', {}).catch(() => {});
+      retractInvites();
+      emit('room');
+      return;
+    }
     detachRoom();
     room = null;
     const ref = r.isHost ? fb.rtdb.ref('rooms/' + r.id) : fb.rtdb.ref('rooms/' + r.id + '/m/' + uid);
@@ -480,13 +512,152 @@ G.Social = (() => {
 
   /** El anfitrión cierra la sala a nuevos jugadores al empezar la partida. */
   function setOpen(open) {
+    if (room && room.relay) { relayRun(!open); return; }     // con el servidor, va con start / end
     if (room && room.isHost) fb.rtdb.ref('rooms/' + room.id + '/open').set(!!open).catch(() => {});
   }
 
   /** Actualiza tu Pokémon en la sala (si cambias de compañero). */
   function refreshMember() {
+    if (room && me && room.relay) { G.Relay.emit('member', pokeInfo()); return; }
     if (room && me) fb.rtdb.ref('rooms/' + room.id + '/m/' + uid).update(
       { dex: G.DB.save.partner, shiny: !!G.DB.save.partnerShiny && G.DB.ownsShiny(G.DB.save.partner) }).catch(() => {});
+  }
+
+  // ---------------- salas en el servidor (G.Relay) ----------------
+  /*
+   * Con ?relay (G.Relay.enabled) la sala está en el servidor propio, que manda en
+   * ella (docs/relay-coop/07-step-4-room-codes.md):
+   *   createRoom -> create { mode }        joinRoom    -> join { code, hideIp }
+   *   leaveRoom  -> leave                  refreshMember -> member { name, dex, shiny }
+   *   setPlaying / setOpen -> start / end (una sala en partida no admite a nadie)
+   *   dropMember -> kick { uid }
+   * y del servidor llegan 'room' (la sala entera), 'peer' (alguien se corta,
+   * vuelve o pierde la plaza) y 'closed' (la sala se acabó: emit('room-closed')).
+   * La sala que ve la interfaz es la de siempre, más code, mode, state y, por
+   * jugador, online, path, sameNet y hideIp.
+   * Los fallos son Error con .code ('not-found', 'full', 'started', 'rate',
+   * 'old-version', 'bad-token', 'busy', 'unreachable', 'timeout'...): el texto
+   * lo pone la interfaz. joinRoom devuelve { ok: false, code, error }.
+   */
+  const relayOn = () => !!(G.Relay && G.Relay.enabled);
+  const codeKey = c => (Array.isArray(c) ? c.join('-') : '');
+  const hideIp = () => !!(G.Settings && G.Settings.get && G.Settings.get('coopHideIp'));
+  function codeErr(code) { const e = Error(code); e.code = code; return e; }
+  const asErr = e => (e && e.code && typeof e.message === 'string' ? e : codeErr((e && e.code) || 'unreachable'));
+  const failed = e => { const err = asErr(e); return { ok: false, code: err.code, error: err }; };
+
+  /** Un código: [4 números], 'n1-n2-n3-n4' (room.id) o lo que escribe el jugador. -> [4] | null */
+  function toCode(x) {
+    let c = null;
+    if (Array.isArray(x)) c = x.map(Number);
+    else if (typeof x === 'string') {
+      const s = x.trim();
+      if (/^\d+(-\d+){3}$/.test(s)) c = s.split('-').map(Number);
+      else if (s && G.RoomCode && G.RoomCode.parseCode) c = G.RoomCode.parseCode(s);
+    }
+    return Array.isArray(c) && c.length === 4 && c.every(n => Number.isInteger(n) && n > 0) ? c : null;
+  }
+
+  /** La sala del servidor (snapshot) con la forma de siempre; r: la que ya había (se rellena). */
+  function fromSnap(s, r) {
+    const host = s.host;
+    const members = (Array.isArray(s.members) ? s.members : []).filter(m => m && m.uid).map(m => ({
+      uid: m.uid, name: m.name, dex: m.dex, shiny: !!m.shiny,
+      online: m.online !== false, path: m.path || null, sameNet: !!m.sameNet, hideIp: !!m.hideIp
+    }))
+      // El anfitrión siempre primero; el resto en el orden del servidor (el de llegada).
+      .sort((a, b) => (a.uid === host ? -1 : b.uid === host ? 1 : 0));
+    // run: lo último que pidió el anfitrión (start / end); sólo lo cambia relayRun.
+    return Object.assign(r || { lost: false, run: s.state === 'playing' }, {
+      id: codeKey(s.code) || (r && r.id) || host, code: Array.isArray(s.code) ? s.code.slice() : r ? r.code : null,
+      relay: true, mode: s.mode === 'server' ? 'server' : 'direct', state: s.state,
+      directWaitMs: s.directWaitMs, host, isHost: host === uid, members, open: s.state !== 'playing'
+    });
+  }
+
+  let hooked = false, creating = null;
+  let relayGen = 0;                 // sube al salir: una respuesta de create / join de antes ya no vale
+  function hookRelay() {
+    if (hooked) return;
+    hooked = true;
+    G.Relay.on('room', onRelayRoom);
+    G.Relay.on('peer', onRelayPeer);
+    G.Relay.on('closed', onRelayClosed);
+  }
+
+  function onRelayRoom(s) {
+    if (!room || !room.relay || !s) return;
+    const k = codeKey(s.code);
+    if (k ? k !== room.id : s.host !== room.host) return;            // otra sala (una de antes)
+    if (!(s.members || []).some(m => m && m.uid === uid)) { closedRoom(); return; }   // ya no estás
+    fromSnap(s, room);
+    emit('room');
+  }
+
+  function onRelayPeer(u, st) {
+    if (!room || !room.relay) return;
+    const m = room.members.find(x => x.uid === u);
+    if (!m) return;
+    if (st === 'gone') room.members = room.members.filter(x => x !== m);
+    else m.online = st === 'online';
+    emit('room');
+  }
+
+  function onRelayClosed() {
+    if (room && room.relay) closedRoom();
+  }
+
+  async function relayCreate(opts) {
+    const mode = (typeof opts === 'string' ? opts : opts && opts.mode) === 'server' ? 'server' : 'direct';
+    hookRelay();
+    const gen = relayGen;
+    let a;
+    try {
+      await G.Relay.connect();
+      a = await G.Relay.request('create', { mode });
+    } catch (e) { throw asErr(e); }
+    if (gen !== relayGen || room) {           // saliste (o entraste en otra) mientras tanto
+      if (!room) G.Relay.request('leave', {}).catch(() => {});
+      if (room) return room;
+      throw codeErr('left');
+    }
+    const s = (a && a.room) || { state: 'lobby', mode, host: uid, members: [Object.assign({ uid }, pokeInfo())] };
+    room = fromSnap(a && a.code ? Object.assign({}, s, { code: a.code }) : s, null);
+    emit('room');
+    return room;
+  }
+
+  async function relayJoin(x) {
+    const code = toCode(x);
+    if (!code) return failed(codeErr('not-found'));
+    if (room && room.id === codeKey(code)) return { ok: true };
+    if (room) await leaveRoom();
+    hookRelay();
+    const gen = relayGen;
+    let a;
+    try {
+      await G.Relay.connect();
+      a = await G.Relay.request('join', { code, hideIp: hideIp() });
+    } catch (e) { return failed(e); }
+    if (gen !== relayGen || room) {           // saliste mientras tanto: fuera también en el servidor
+      if (!room) G.Relay.request('leave', {}).catch(() => {});
+      return failed(codeErr('left'));
+    }
+    const last = G.Relay.room;
+    const s = (a && a.room) || (last && codeKey(last.code) === codeKey(code) ? last : null);
+    if (!s) return failed(codeErr('not-found'));
+    room = fromSnap(Object.assign({}, s, { code: s.code || code }), null);
+    room.sameNet = !!(a && a.sameNet);
+    emit('room');
+    return { ok: true, sameNet: room.sameNet };
+  }
+
+  /** Anfitrión: empieza (on) o acaba la partida en el servidor, una sola vez por cambio. */
+  function relayRun(on) {
+    if (!room || !room.relay || !room.isHost || room.run === on) return;
+    room.run = on;
+    room.open = !on;
+    G.Relay.request(on ? 'start' : 'end', {}).catch(e => console.warn('[Social] ' + (on ? 'start' : 'end') + ':', e.code || e.message));
   }
 
   // ---------------- misma wifi ----------------
@@ -517,9 +688,15 @@ G.Social = (() => {
     ip = String(ip || '').trim();
     if (!G.Net.isLocalIp(ip)) return { ok: false, error: BAD_IP };
     if (room && !room.isHost) return { ok: false, error: 'Sólo el anfitrión de la sala puede hacerlo.' };
-    const r = room || await createRoom();
+    let r = room;
+    if (!r) {
+      // Con el servidor, si no se puede crear la sala, el fallo es el resultado (como en joinRoom).
+      if (relayOn()) { try { r = await createRoom(); } catch (e) { return failed(e); } }
+      else r = await createRoom();
+    }
     r.lanIp = ip;
     emit('room');
+    if (r.relay) return { ok: true };       // con el servidor no hay «Entrar por IP» (se entra con el código)
     G.Net.publicIp().then(async pub => {
       if (!pub || room !== r || r.lanIp !== ip) return;
       const key = await lanKey(pub, ip);
@@ -533,6 +710,7 @@ G.Social = (() => {
   async function findLocal(ip) {
     ip = String(ip || '').trim();
     if (!G.Net.isLocalIp(ip)) return { ok: false, error: BAD_IP };
+    if (relayOn()) return failed(codeErr('not-found'));    // con el servidor se entra con el código
     const pub = await G.Net.publicIp();
     if (!pub) return { ok: false, error: 'No se pudo comprobar tu red. Revisa la conexión y prueba otra vez.' };
     let key;
@@ -558,12 +736,17 @@ G.Social = (() => {
     if (!f || f.status !== 'ok') return { ok: false, error: 'Sólo puedes invitar a tus amigos.' };
     if (room && room.members.length >= MAX_PLAYERS) return { ok: false, error: 'La sala está llena.' };
     if (room && !room.isHost) return { ok: false, error: 'Sólo el anfitrión de la sala puede invitar.' };
-    if (!room) await createRoom();
+    if (!room) {
+      if (relayOn()) { try { await createRoom(); } catch (e) { return failed(e); } }
+      else await createRoom();
+    }
     // Acabas de invitarle a esta sala: ya la tiene (pulsar otra vez no escribe nada; 25-10-2026).
     const s = sentInv.get(other);
     if (s && s.room === room.id && now() - s.at < REINVITE_MS) return { ok: true, msg: 'Invitación enviada a ' + f.name };
     try {
-      await fb.fs.collection('inv').doc(other + '_' + uid).set({ to: other, from: uid, room: room.id, name: me.name, at: fts() });
+      // Con el servidor va también el código (room sigue ahí para los que aún no lo usan).
+      await fb.fs.collection('inv').doc(other + '_' + uid).set(Object.assign(
+        { to: other, from: uid, room: room.id, name: me.name, at: fts() }, room.relay && room.code ? { code: room.code } : {}));
     } catch (e) { return { ok: false, error: 'No se pudo invitar (' + (e.code || 'error') + ').' }; }
     sentInv.set(other, { room: room.id, at: now() });
     return { ok: true, msg: 'Invitación enviada a ' + f.name };
@@ -583,7 +766,8 @@ G.Social = (() => {
     if (!v || (v.at && now() - msOf(v.at) > INVITE_TTL)) { ref.delete().catch(() => {}); return; }
     const f = friends.get(v.from);
     if (f && f.status !== 'ok') return;
-    invites.set(v.from, { from: v.from, name: v.name, room: v.room, at: msOf(v.at) || now() });
+    const code = Array.isArray(v.code) ? toCode(v.code) : null;
+    invites.set(v.from, Object.assign({ from: v.from, name: v.name, room: v.room, at: msOf(v.at) || now() }, code ? { code } : {}));
     emit('invites');
   }
 
@@ -595,7 +779,7 @@ G.Social = (() => {
     invites.delete(from);
     invDoc(from).delete().catch(() => {});
     emit('invites');
-    return joinRoom(inv.room);
+    return joinRoom(relayOn() && inv.code ? inv.code : inv.room);
   }
 
   function declineInvite(from) {
