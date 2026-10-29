@@ -1,78 +1,98 @@
-# Relay co-op: plan
+# Standalone PokéSurvivor: plan
 
-Co-op that connects on the first try on any network, and stays as fast as
-possible when friends share a Wi-Fi.
+A copy of the game you can deploy yourself: one Node server, one Docker image,
+one SQLite file. No Firebase, and no calls to the original game's servers
+(`pokesurvivor.com`, `ice.pokesurvivor.com`, `turn.pokesurvivor.com`).
 
-- **Host direct, like old-school console hosting.** The host's browser runs the
-  match (as today) and guests connect straight to it over WebRTC.
-- **The server is the middleman.** A small socket.io server on Fly.io or Railway
-  always handles rooms, room codes and the connection setup. It carries match
-  traffic only for guests who can't reach the host directly.
-- **No more "your network doesn't allow group play".** A guest whose direct
-  connection doesn't open in time plays through the server instead.
+- **Accounts:** sign in with a 6-digit code sent by email. The session lives in
+  an `httpOnly` cookie. Guests play without an email.
+- **Co-op:** the host's browser runs the match, as today. Guests connect
+  straight to the host over WebRTC when they can, and through the server when
+  they can't. Rooms use four-Pokémon codes.
+- **Saves, friends, rankings:** on the same server, in SQLite.
+- **Deploy:** `docker run` on any machine, or Fly.io / Railway with a volume.
 
-Gameplay, `coop.js`, the binary codec, saves, friends and rankings don't change.
-
-Visual version of this spec (with a room code demo):
-<https://claude.ai/artifact/NsVzVkq1qb7GThtJrttntt>
+Gameplay, `coop.js`, the binary codec, the save format and its merge logic
+(`G.DB.merge`), and the screens stay.
 
 ## Documents
 
 | File | What it covers |
 | --- | --- |
-| [01-architecture.md](01-architecture.md) | The two paths, what stays, what goes |
-| [02-protocol.md](02-protocol.md) | Every socket.io event, limits, sequences |
-| [03-step-0-measure.md](03-step-0-measure.md) | Measure real traffic before building |
-| [04-step-1-server.md](04-step-1-server.md) | The `relay/` server, run locally |
-| [05-step-2-signaling.md](05-step-2-signaling.md) | WebRTC setup over the socket instead of the Realtime Database |
-| [06-step-3-server-path.md](06-step-3-server-path.md) | Fallback: match traffic through the server |
-| [07-step-4-room-codes.md](07-step-4-room-codes.md) | Rooms on the server, four-Pokémon codes |
-| [08-step-5-lobby-ui.md](08-step-5-lobby-ui.md) | Create/join screens, path badges, strings |
-| [09-step-6-deploy.md](09-step-6-deploy.md) | Fly.io or Railway |
-| [10-step-7-field-test.md](10-step-7-field-test.md) | Real networks, tuning |
-| [11-step-8-cleanup.md](11-step-8-cleanup.md) | Remove TURN and RTDB code, turn it on by default |
-| [12-security.md](12-security.md) | Risks and limits |
+| [01-architecture.md](01-architecture.md) | The one server, what talks to what, what leaves |
+| [02-protocol.md](02-protocol.md) | HTTP API and socket events |
+| [03-data-model.md](03-data-model.md) | SQLite tables, migrations, backups |
+| [04-auth.md](04-auth.md) | Email codes, cookie sessions, guests |
+| [05-step-1-server.md](05-step-1-server.md) | One server: game files, API, socket, SQLite, Docker |
+| [06-step-2-accounts.md](06-step-2-accounts.md) | Sign in by email code, guests, login screen |
+| [07-step-3-saves.md](07-step-3-saves.md) | Saves on the server, import of old browser saves |
+| [08-step-4-coop.md](08-step-4-coop.md) | Co-op only through the server's socket |
+| [09-step-5-codes-lobby.md](09-step-5-codes-lobby.md) | Room codes and lobby screens |
+| [10-step-6-friends.md](10-step-6-friends.md) | Nicknames, profiles, friends, invites, online status |
+| [11-step-7-rankings.md](11-step-7-rankings.md) | Leaderboards, server-timed runs, moderation |
+| [12-step-8-cleanup.md](12-step-8-cleanup.md) | Remove Firebase and the original game's ties |
+| [13-step-9-deploy.md](13-step-9-deploy.md) | Docker, Fly.io or Railway, email, domain, backups |
+| [14-step-10-field-test.md](14-step-10-field-test.md) | Real networks, real players, tuning |
+| [15-security.md](15-security.md) | Risks and limits |
+| [16-from-the-prs.md](16-from-the-prs.md) | What we keep from PRs 1 to 6 |
 
 ## Status
 
-Each step lands as its own commit (or PR) and keeps the game working. Until
-step 8, everything new sits behind the `?relay` URL flag, so the live behavior
-doesn't change.
+Each step is one PR into `standalone` (see
+[16-from-the-prs.md](16-from-the-prs.md#branch-plan)). The game keeps working
+after every step.
 
-- [ ] Step 0: measure traffic
-- [ ] Step 1: relay server (local)
-- [ ] Step 2: signaling over the socket
-- [ ] Step 3: server path fallback
-- [ ] Step 4: rooms and codes on the server
-- [ ] Step 5: lobby UI and strings
-- [ ] Step 6: deploy
-- [ ] Step 7: field test and tuning
-- [ ] Step 8: cleanup, on by default
+- [ ] Step 1: one server
+- [ ] Step 2: accounts
+- [ ] Step 3: saves
+- [ ] Step 4: co-op over the socket
+- [ ] Step 5: room codes and lobby
+- [ ] Step 6: friends and invites
+- [ ] Step 7: rankings and moderation
+- [ ] Step 8: cleanup
+- [ ] Step 9: deploy
+- [ ] Step 10: field test
 
-Rough total: 8 to 11 working days.
+Rough total: 14 to 16 working days.
 
 ## Decisions
 
 | Question | Answer |
 | --- | --- |
-| Web app or Electron? | Web app. Electron is out of scope. |
-| Keep WebRTC direct? | Yes, tried first. |
-| Server library | socket.io 4. uWebSockets.js only if load ever needs it (socket.io can run on it without client changes). |
-| Hosting | Fly.io or Railway, one instance. **Pick one before step 6.** |
-| Room codes | Four Pokémon, stored as Pokédex numbers, shown localized, order matters. |
-| Upgrade from server to direct mid-run | No. The next lobby tries direct again. |
-| Host migration | Out. If the host leaves, the run ends, as today. |
-| `coop-misma-wifi` branch | Kept: its "Connect locally" feature is the same-Wi-Fi speed boost. Join-by-IP is replaced by codes in step 8. |
-| Fork or upstream | Open. Real accounts only work on the owner's site (see [01-architecture.md](01-architecture.md#fork-constraint)). |
+| Firebase | Removed: SDK, config, rules, emulators. |
+| Sign in | 6-digit code by email, valid 10 minutes. No passwords, no Google. |
+| Session | `httpOnly` cookie `ps_sid`, 180 days, renewed on use. |
+| Guests | A real server account without an email, tied to the cookie. Can play solo and co-op and keeps a server save. Friends and rankings need an email. |
+| Storage | SQLite (`better-sqlite3`), one file on a volume. |
+| Server | Node 22, Express 4, socket.io 4. One process, one instance. |
+| Email | SMTP through `nodemailer`, so any provider works. `MAIL=console` prints codes in development. |
+| Ranking anti-cheat | The server times each run (start and finish both reach it). Replaces the original game's seals. |
+| Co-op | Direct WebRTC first, server path as fallback. Host can force "Always through server". |
+| TURN | None. The server path does that job. |
+| Feature flag | None. This is the only stack in the fork. |
+| Original game's domain | Becomes config (`SITE_URL`). `CNAME` and links to `pokesurvivor.com` go. |
+| Upstream | Not a goal. |
+
+## License
+
+The code license ([LICENSE](../../LICENSE), PolyForm Noncommercial 1.0.0)
+allows using, changing and sharing the game for noncommercial purposes. It
+requires that anyone who gets a copy also gets the license terms and the
+`Required Notice:` line. No selling, no charging to play, no ads. Read it
+before deploying publicly.
 
 ## Ground rules (from the project's CLAUDE.md)
 
 - Edit `dev.html`, never `index.html`. Build with
   `node tools/build.js && node tools/export_data.js && python tools/make_seo_pages.py`.
-- Every game change gets a changelog entry in `js/data/changelog.js` (es and en).
-  Server and hosting changes don't.
+- Every game change gets a changelog entry in `js/data/changelog.js` (es and
+  en). Server and hosting changes don't.
 - New UI strings go in `js/data/lang-en.js` and `js/data/lang-updates.js`
-  (all 7 languages). `node --test tests/` fails if one is missing.
-- Never enable Firebase Identity Platform. The server checks tokens with public
-  keys only.
+  (all 7 languages). The i18n test fails if one is missing.
 - Keep `js/core/updater.js` and the `version.json` write in `tools/build.js`.
+  Players still update on their own, now from your server.
+- Commits with no AI signature.
+- Tests: `node --test tests/*.test.cjs` (Node 24 refuses a bare folder) and
+  `cd server && npm test`.
+- The "Servidores" section of the project's CLAUDE.md describes the original
+  game's Firebase and Cloudflare setup. Step 8 replaces it.
