@@ -14,7 +14,7 @@
  * porque la conexión parpadea, el siguiente envío lo arregla y nadie se queda
  * esperando a otro para siempre (pasaba en 2026-10).
  *
- * Mensajes (por net.js, unas 15 veces por segundo; 3 si va por el relé):
+ * Mensajes (por net.js, unas 15 veces por segundo; 3 mientras se conecta o si el otro se ha caído):
  *   invitado -> anfitrión  { k:'f', p:[estado], ev:[eventos], h, w }   (h, w: ver flushClient)
  *   anfitrión -> invitado  { k:'f', t, lv, xp, xn, ki, bo, co, p:{uid:[estado]},
  *                            e:[[id,x,y,vida,anim,dir,estados]], ev:[eventos],
@@ -26,8 +26,8 @@
 G.Coop = (() => {
   const ANIMS = ['Idle', 'Walk', 'Attack', 'Shoot', 'Charge', 'Hurt', 'Faint'];
   const COLORS = ['#ffcb3d', '#5fc8ff', '#7ee07a', '#ff8ad8'];
-  // Mensajes por segundo: 15 por la conexión directa y 3 por el relé de la
-  // Realtime Database (apagado: 1 $ el GB).
+  // Mensajes por segundo: 15 por la conexión directa y por el servidor, y 3 mientras
+  // la pareja aún se conecta o el otro se ha caído un momento (G.Net.slow).
   const RATE_FAST = 1 / 15, RATE_SLOW = 1 / 3;
   const rateFor = u => (G.Net.slow(u) ? RATE_SLOW : RATE_FAST);
   // Los envíos van por el reloj de verdad (performance.now), no por el dt del juego:
@@ -351,10 +351,16 @@ G.Coop = (() => {
 
   // ---------------- recepción ----------------
 
-  G.Net.on((from, msg) => {
+  /*
+   * old: net.js ya entregó un envío más nuevo de ese jugador (este llegó tarde, al
+   * cambiar de camino o repetido). Sus eventos se aplican (una vez: net.js no repite
+   * nada), pero su estado no: las posiciones y la vida volverían atrás.
+   */
+  G.Net.on((from, msg, old) => {
     if (!msg) return;
     if (msg.k === 'start') { if (G.Flow.startCoop) G.Flow.startCoop(msg); return; }
     if (!active || msg.k !== 'f') return;
+    if (old) msg = { k: 'f', ev: msg.ev, old: true };
     if (host) onClientFrame(from, msg); else if (from === hostUid) onHostFrame(msg);
   });
 
@@ -514,6 +520,7 @@ G.Coop = (() => {
     lastHostAt = performance.now();
     if (stalled) { stalled = false; updateAway(); }
     for (const ev of msg.ev || []) applyHostEvent(ev);
+    if (msg.old) return;                         // llegó tarde: sólo sus eventos
     if (msg.ar) G.Rift.netApply(msg.ar);
     if (msg.ja) G.Judgment.netApply(msg.ja);
     // Quién elige y las cartas de nivel, aunque se haya perdido algún aviso.

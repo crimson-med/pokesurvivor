@@ -376,11 +376,7 @@
   <div class="box wide">
     <div class="row between"><h2>Amigos</h2>
       <div class="row"><button id="fr-room" class="btn small gold hidden">Ir a la sala</button><button class="btn small ghost" data-back>Volver</button></div></div>
-    <div class="tabs" id="fr-tabs">
-      <div class="tab on" data-tab="online">En línea</div>
-      <div class="tab" data-tab="lan">Misma wifi</div>
-    </div>
-    <!-- Servidor propio (sólo con ?relay): crear sala o entrar con código (social-ui.js) -->
+    <!-- Crear sala o entrar con código (social-ui.js) -->
     <div id="fr-code" class="fr-code hidden">
       <h3>Crear sala</h3>
       <div class="chips code-mode" id="code-mode">
@@ -410,31 +406,6 @@
       <p id="fr-msg" class="note"></p>
       <div id="fr-list" class="fr-list"></div>
     </div>
-    <!-- Misma wifi: sala local con la IP del anfitrión (social.js, setLocal / findLocal) -->
-    <div id="fr-lan" class="hidden">
-      <p class="sub">Juega con quien esté en tu misma wifi, sin añadirlo como amigo.</p>
-      <form id="lan-host" autocomplete="off">
-        <label for="lan-ip">Tu IP local</label>
-        <div class="row">
-          <input id="lan-ip" class="field grow" maxlength="15" inputmode="decimal" spellcheck="false" placeholder="192.168.1.20">
-          <button class="btn gold" type="submit" data-sfx="confirm">Crear sala local</button>
-        </div>
-        <button type="button" class="lan-link" id="lan-help-btn">¿Dónde la veo?</button>
-        <div id="lan-help" class="lan-help hidden">
-          <b>Windows:</b> Configuración › Red e Internet › Wi-Fi › tu red › Dirección IPv4.<br>
-          <b>Mac:</b> Ajustes del Sistema › Wi-Fi › Detalles › TCP/IP › Dirección IP.<br>
-          <b>iPhone:</b> Ajustes › Wi-Fi › la (i) de tu red › Dirección IP.<br>
-          <b>Android:</b> Ajustes › Wi-Fi › tu red › Dirección IP (el menú cambia según el móvil).
-        </div>
-      </form>
-      <h3 class="lan-h">Entrar por IP</h3>
-      <form id="lan-join" class="row" autocomplete="off">
-        <input id="lan-join-ip" class="field grow" maxlength="15" inputmode="decimal" spellcheck="false" placeholder="IP del anfitrión">
-        <button class="btn gold" type="submit">Buscar sala</button>
-      </form>
-      <p id="lan-msg" class="note"></p>
-      <div id="lan-found" class="fr-list"></div>
-    </div>
   </div>
 </section>
 
@@ -445,7 +416,6 @@
       <div class="row"><button id="lobby-menu" class="btn small ghost">Menú</button><button id="lobby-leave" class="btn small ghost">Salir de la sala</button></div></div>
     <p class="sub" id="lobby-sub"></p>
     <div id="lobby-code" class="lobby-code hidden"></div>
-    <div id="lobby-lan" class="lobby-lan hidden"></div>
     <div id="lobby-members" class="lobby-members"></div>
     <div id="lobby-hint" class="lobby-hint hidden"></div>
     <h3 id="lobby-inv-title" style="margin:14px 0 6px">Invitar amigos</h3>
@@ -687,7 +657,6 @@
 <script defer src="js/data/room-words.js"></script>
 <!-- núcleo -->
 <script defer src="js/core/firebase-config.js"></script>
-<script defer src="js/net/relay-config.js"></script>
 <script defer src="js/core/save-merge.js"></script>
 <script defer src="js/net/api.js"></script>
 <script defer src="js/core/db.js"></script>

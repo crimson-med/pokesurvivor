@@ -8,12 +8,20 @@
  * attach(httpServer, deps) -> { io, rooms, limits, stats(), shutdown(why), kick(uid, hash), close() }
  *   deps.cfg        config.js (siteUrl, maxRooms, maxSockets, maxMsgBytes,
  *                   directWaitMs, trustProxy, dev)
- *   deps.sessionOf  cabecera Cookie -> { uid, name, kind, hash } o null
+ *   deps.sessionOf  cabecera Cookie -> { uid, name, kind, hash, banned? } o null
  *                   (guard.fromCookie, la sesión ps_sid de http/guard.js)
+ *   deps.rank       (opcional) rankings: openCoopRun(sala) -> run o null, al
+ *                   empezar el anfitrión una partida (start)
+ *   deps.db         (opcional) la base de datos: para no dejar entrar a una
+ *                   cuenta baneada (users.banned, o su correo en bans con
+ *                   deps.rank.standing)
  *   deps.rooms, deps.limits, deps.sweepMs   para las pruebas
  *
- * Entrada: la cookie de la sesión, que el navegador manda en el handshake
- * (mismo origen). Sin sesión válida: signed-out. El nombre es el de la cuenta.
+ * Entrada: auth { v: 2, dex, shiny, ep } y la cookie de la sesión, que el
+ * navegador manda en el handshake (mismo origen). Sin sesión válida:
+ * signed-out; cuenta bloqueada: banned. El nombre es el de la cuenta. ep: un
+ * texto al azar por carga de la página (ver rooms.js).
+ * Las salas sólo se crean con código (create { mode }).
  * kick(uid, hash) cierra los sockets de una cuenta (con hash, sólo los de esa
  * sesión): al salir, salir de todas partes o borrar la cuenta.
  *
@@ -28,7 +36,7 @@ const { createLimits } = require('./limits');
 const words = require('./words');
 const { isLocalOrigin } = require('../config');
 
-const VERSION = 1;
+const VERSION = 2;
 const VERSIONS = [VERSION, VERSION - 1].filter(v => v >= 1);   // la actual y la anterior
 const CLOSED_MEMORY_MS = 10 * 60 * 1000;
 
@@ -72,6 +80,8 @@ function sizeOf(x) {
 }
 
 const isSeq = n => Number.isSafeInteger(n) && n >= 0;
+// La carga de la página que manda el juego (relay.js): corta y sin rarezas.
+const cleanEp = x => (typeof x === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(x) ? x : null);
 
 function attach(httpServer, deps = {}) {
   const c = deps.cfg;
@@ -79,6 +89,16 @@ function attach(httpServer, deps = {}) {
   const rooms = deps.rooms || createRooms({ maxRooms: c.maxRooms, directWaitMs: c.directWaitMs, words: words.load(c.staticDir) });
   const limits = deps.limits || createLimits();
   const sessionOf = deps.sessionOf || (() => null);
+  // Baneada: users.banned o, si el ranking lo sabe (rank.standing), su correo en bans
+  // (que queda aunque se borre la cuenta y se vuelva a hacer con el mismo).
+  const userQ = deps.db ? deps.db.prep('SELECT uid, kind, email, name, banned FROM users WHERE uid = ?') : null;
+  const isBanned = who => {
+    if (who.banned) return true;
+    const u = userQ && userQ.get(who.uid);
+    if (!u) return false;
+    if (u.banned) return true;
+    return !!(deps.rank && deps.rank.standing && deps.rank.standing(u) === 'banned');
+  };
   const sockets = new Map();        // uid -> socket actual
   const closedAway = new Map();     // uid -> { why, at }: perdió la sala mientras estaba caído
   let relayed = 0;                  // bytes reenviados (sig + m)
@@ -98,8 +118,7 @@ function attach(httpServer, deps = {}) {
   });
 
   // ---------- Aplicar lo que devuelve rooms.js ----------
-  // joinSocket: el socket que entra en f.room, después de cerrar las salas
-  // viejas (en el modo { id } la sala nueva puede tener la misma clave).
+  // joinSocket: el socket que entra en f.room, después de cerrar las salas viejas.
   function apply(f, joinSocket) {
     const t = Date.now();
     if (f.kicked) {
@@ -130,12 +149,14 @@ function attach(httpServer, deps = {}) {
       logClose(r, cl.why);
     }
     if (joinSocket && f.ok && f.room) joinSocket.join(rk(f.room));
+    // La foto antes que peer: quien vuelve tras recargar trae otro ep, y net.js tiene
+    // que verlo antes de repetirle nada con la numeración de antes.
+    for (const room of f.changed) io.to(rk(room)).emit('room', rooms.snapshot(room));
     for (const p of f.peer) {
       let to = io.to(rk(p.room));
       if (p.sid) to = to.except(p.sid);
       to.emit('peer', p.uid, p.state);
     }
-    for (const room of f.changed) io.to(rk(room)).emit('room', rooms.snapshot(room));
   }
 
   function logClose(r, why) {
@@ -167,10 +188,14 @@ function attach(httpServer, deps = {}) {
     let who = null;
     try { who = sessionOf(socket.request.headers.cookie); } catch (e) { console.error('[io] sesión: ' + e.message); }
     if (!who) return next(new Error('signed-out'));
+    let banned = false;
+    try { banned = isBanned(who); } catch (e) { console.error('[io] banned: ' + e.message); }
+    if (banned) return next(new Error('banned'));
     if (sockets.size >= c.maxSockets && !sockets.has(who.uid)) return next(new Error('busy'));
     socket.data.uid = who.uid;
     socket.data.session = who.hash;
     socket.data.v = a.v;
+    socket.data.ep = cleanEp(a.ep);
     socket.data.info = { name: who.name, dex: a.dex, shiny: a.shiny };
     socket.data.ip = publicIp(socket.handshake, c.trustProxy);
     next();
@@ -188,7 +213,7 @@ function attach(httpServer, deps = {}) {
     for (const r of [...socket.rooms]) if (r.startsWith('r:') && (!room || r !== rk(room))) socket.leave(r);
     if (room) {
       closedAway.delete(uid);
-      apply(rooms.markBack(uid, { sid: socket.id, pubIp: socket.data.ip }), socket);
+      apply(rooms.markBack(uid, { sid: socket.id, pubIp: socket.data.ip, ep: socket.data.ep }), socket);
     } else {
       // Perdió la sala mientras estaba caído. Si la conexión se recuperó, ya
       // le llegó el aviso con lo pendiente; si es nueva, se le dice ahora.
@@ -200,7 +225,7 @@ function attach(httpServer, deps = {}) {
       }
     }
 
-    const extra = () => ({ pubIp: socket.data.ip, sid: socket.id, v: socket.data.v });
+    const extra = () => ({ pubIp: socket.data.ip, sid: socket.id, v: socket.data.v, ep: socket.data.ep });
     // Eventos de control: tope por socket; los que llevan respuesta dicen 'rate'.
     const ctl = cb => {
       if (limits.ctl.take(uid)) return true;
@@ -213,9 +238,9 @@ function attach(httpServer, deps = {}) {
       const [p, cb] = args(p0, cb0);
       if (!ctl(cb)) return;
       if (!limits.create.take(uid)) return reply(cb, { ok: false, err: 'rate' });
-      const f = rooms.create(uid, socket.data.info, { id: p.id, mode: p.mode }, extra());
+      const f = rooms.create(uid, socket.data.info, { mode: p.mode }, extra());
       apply(f, socket);
-      reply(cb, f.ok ? { ok: true, code: f.room.code ? f.room.code.slice() : null, room: rooms.snapshot(f.room) } : { ok: false, err: f.err });
+      reply(cb, f.ok ? { ok: true, code: f.room.code.slice(), room: rooms.snapshot(f.room) } : { ok: false, err: f.err });
     });
 
     socket.on('join', (p0, cb0) => {
@@ -249,15 +274,35 @@ function attach(httpServer, deps = {}) {
       apply(rooms.update(uid, socket.data.info));
     });
 
-    for (const ev of ['start', 'end']) {
-      socket.on(ev, (p0, cb0) => {
-        const [, cb] = args(p0, cb0);
-        if (!ctl(cb)) return;
-        const f = rooms[ev](uid);
-        apply(f);
-        reply(cb, f.ok ? { ok: true } : { ok: false, err: f.err });
-      });
-    }
+    // start también abre la partida en grupo del ranking (paso 7, deps.rank):
+    // el servidor apunta quién juega y cuándo empieza.
+    socket.on('start', (p0, cb0) => {
+      const [, cb] = args(p0, cb0);
+      if (!ctl(cb)) return;
+      const before = rooms.roomOf(uid);
+      const fresh = !!(before && before.state === 'lobby');
+      const f = rooms.start(uid);
+      apply(f);
+      if (!f.ok) return reply(cb, { ok: false, err: f.err });
+      // Una partida por start de verdad (de la sala de espera): repetir start jugando no
+      // abre otra (si no, el anfitrión podría elegir la que más le conviniera).
+      // (Puede devolver el run o una promesa con él; si falla, la partida sigue sin ranking.)
+      let run = null;
+      try {
+        run = fresh && deps.rank && deps.rank.openCoopRun ? deps.rank.openCoopRun(before) : null;
+      } catch (e) { console.error('[io] openCoopRun: ' + e.message); }
+      Promise.resolve(run)
+        .catch(e => { console.error('[io] openCoopRun: ' + (e && e.message)); return null; })
+        .then(r => reply(cb, { ok: true, run: r ?? null }));
+    });
+
+    socket.on('end', (p0, cb0) => {
+      const [, cb] = args(p0, cb0);
+      if (!ctl(cb)) return;
+      const f = rooms.end(uid);
+      apply(f);
+      reply(cb, f.ok ? { ok: true } : { ok: false, err: f.err });
+    });
 
     socket.on('kick', (p0, cb0) => {
       const [p, cb] = args(p0, cb0);

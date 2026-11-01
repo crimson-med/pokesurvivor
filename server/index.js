@@ -50,7 +50,7 @@ function createServer(cfg, opts = {}) {
   const mailer = opts.mailer || createMailer(cfg);
   // Las partidas del ranking (http/rank.js): el socket abre las de grupo con openCoopRun.
   const rank = require('./http/rank').create({ cfg, db, guard, now: opts.now });
-  const relay = attach(server, { cfg, sessionOf: guard.fromCookie, rank, ...opts.relay });
+  const relay = attach(server, { cfg, sessionOf: guard.fromCookie, rank, db, ...opts.relay });
   const deps = { cfg, db, guard, relay, mailer, rank, now: opts.now };
   const version = readVersion(cfg.staticDir);
 

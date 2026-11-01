@@ -3,9 +3,9 @@
   const $ = G.UI.$;
   const esc = G.U.esc;
 
-  /** ¿Se puede usar lo online? Si no, explica por qué. (Sin Firebase, G.DB.fb, aún no: pasos 4 a 7.) */
+  /** ¿Se puede usar lo online (cuenta en el servidor del juego)? Si no, explica por qué. */
   function needOnline() {
-    if (G.DB.online && G.DB.fb) return true;
+    if (G.DB.online) return true;
     G.UI.toast(G.DB.guest ? 'Crea una cuenta para jugar con amigos y salir en el ranking.'
       : 'Esto necesita la versión online del juego (con la nube).', 3200);
     return false;
@@ -60,15 +60,13 @@
     + '<b>iPhone:</b> Ajustes › Wi-Fi › la (i) de tu red › Dirección IP.<br>'
     + '<b>Android:</b> Ajustes › Wi-Fi › tu red › Dirección IP (el menú cambia según el móvil).';
 
-  // ======================= SERVIDOR PROPIO (?relay) =======================
+  // ======================= SALAS CON CÓDIGO =======================
   /*
-   * Cooperativo con servidor propio (docs/relay-coop, paso 5): salas con un código
-   * de cuatro Pokémon, elegir si se va directo o siempre por el servidor, y cómo
-   * llega cada jugador al anfitrión. Sólo se ve con G.Relay.enabled (?relay y un
-   * servidor configurado); sin eso, Amigos y la sala quedan como estaban.
-   * G.Relay y G.RoomCode pueden no estar cargados: cada uso lo comprueba.
+   * Cooperativo por el servidor del juego (docs/relay-coop, paso 5): salas con un
+   * código de cuatro Pokémon, elegir si se va directo o siempre por el servidor, y
+   * cómo llega cada jugador al anfitrión. G.RoomCode puede no estar cargado: cada
+   * uso lo comprueba.
    */
-  const relayOn = () => !!(G.Relay && G.Relay.enabled);
   const curLang = () => (G.I18n && G.I18n.lang) || 'es';
 
   // Errores del servidor (Error con .code; ver docs/relay-coop/02-protocol.md).
@@ -79,11 +77,11 @@
     started: 'La partida de esa sala ya ha empezado.',
     rate: 'Demasiados intentos. Espera un minuto y vuelve a probar.',
     'old-version': 'Actualiza el juego para jugar en grupo.',
-    'bad-token': 'Vuelve a iniciar sesión para jugar en grupo.',
+    'signed-out': 'Vuelve a iniciar sesión para jugar en grupo.',
+    banned: 'Esta cuenta no puede jugar en grupo.',
     busy: 'El juego en grupo está lleno ahora mismo. Prueba otra vez en unos minutos.',
     unreachable: NO_SERVER,
-    timeout: NO_SERVER,
-    disabled: 'Para jugar en grupo necesitas una cuenta.'   // (modo local, sin la nube)
+    timeout: NO_SERVER
   };
   /** Error del servidor (o respuesta { ok: false, err | error }) -> texto para el jugador. */
   function relayError(e, fallback) {
@@ -168,48 +166,7 @@
       $('fr-room').onclick = () => G.LobbyUI.open();
       G.Social.on(() => { if (G.UI.isOpen('scr-friends')) render(); });
 
-      // Misma wifi: crear sala local o entrar por la IP del anfitrión.
-      $('fr-tabs').onclick = e => { const t = e.target.closest('.tab'); if (t) tab(t.dataset.tab); };
-      $('lan-help-btn').onclick = () => $('lan-help').classList.toggle('hidden');
-      $('lan-host').onsubmit = async e => {
-        e.preventDefault();
-        lanMsg('');
-        const ip = $('lan-ip').value.trim();
-        const r = await G.Social.setLocal(ip);
-        if (!r.ok) { lanMsg(errText(r), true); return; }
-        saveIp(ip);
-        G.LobbyUI.open();
-      };
-      $('lan-join').onsubmit = async e => {
-        e.preventDefault();
-        lanMsg('');
-        $('lan-found').innerHTML = '';
-        const btn = $('lan-join').querySelector('button');
-        btn.disabled = true; btn.textContent = 'Buscando…';
-        const r = await G.Social.findLocal($('lan-join-ip').value);
-        btn.disabled = false; btn.textContent = 'Buscar sala';
-        if (!r.ok) { lanMsg(errText(r), true); return; }
-        G.Audio.sfx('confirm');
-        const own = !!(G.Social.room && G.Social.room.id === r.room.id);
-        const el = document.createElement('div');
-        el.className = 'fr-row';
-        el.innerHTML = `<i class="dot on"></i><b translate="no">${esc(r.room.name)}</b><span class="st">En tu wifi · ${r.room.n}/${G.Social.MAX_PLAYERS}</span><span class="grow"></span>`;
-        const b = document.createElement('button');
-        b.className = 'btn small gold'; b.textContent = own ? 'Ir a la sala' : 'Unirme';
-        b.onclick = async () => {
-          if (!own) {
-            b.disabled = true;
-            const j = await G.Social.joinRoom(r.room.id);
-            b.disabled = false;
-            if (!j.ok) { lanMsg(errText(j), true); return; }
-          }
-          G.LobbyUI.open();
-        };
-        el.appendChild(b);
-        $('lan-found').appendChild(el);
-      };
-
-      // Servidor propio: crear sala (directa primero o siempre por el servidor) o entrar con código.
+      // Crear sala (directa primero o siempre por el servidor) o entrar con código.
       $('code-mode').onclick = e => {
         const c = e.target.closest('[data-mode]');
         if (!c) return;
@@ -265,7 +222,7 @@
     /** Nombres para el autocompletado, en el idioma del jugador. */
     function suggest(prefix) {
       const dl = $('code-dl');
-      const rc = G.RoomCode && G.RoomCode.suggest ? G.RoomCode : G.Relay && G.Relay.suggest ? G.Relay : null;
+      const rc = G.RoomCode && G.RoomCode.suggest ? G.RoomCode : null;
       const p = String(prefix || '').trim();
       let list = [];
       if (p && rc) { try { list = rc.suggest(p, curLang()) || []; } catch (e) { list = []; } }
@@ -281,19 +238,6 @@
     function codeMsg(t, bad) {
       $('code-msg').textContent = t || '';
       $('code-msg').style.color = bad ? '#ffb0b8' : '';
-      if (t && bad) G.Audio.sfx('error');
-    }
-
-    function tab(t) {
-      document.querySelectorAll('#fr-tabs .tab').forEach(x => x.classList.toggle('on', x.dataset.tab === t));
-      $('fr-online').classList.toggle('hidden', t !== 'online');
-      $('fr-lan').classList.toggle('hidden', t !== 'lan');
-      if (t === 'lan' && !$('lan-ip').value) $('lan-ip').value = lastIp();
-    }
-
-    function lanMsg(t, bad) {
-      $('lan-msg').textContent = t || '';
-      $('lan-msg').style.color = bad ? '#ffb0b8' : '';
       if (t && bad) G.Audio.sfx('error');
     }
 
@@ -319,11 +263,9 @@
 
     function render() {
       const room = G.Social.room;
-      // Con el servidor propio, los códigos sustituyen a «Misma wifi» (entrar por IP).
-      const relay = relayOn();
-      $('fr-tabs').classList.toggle('hidden', relay);
-      if (relay && $('fr-online').classList.contains('hidden')) tab('online');
-      $('fr-code').classList.toggle('hidden', !relay || !!room);
+      $('fr-code').classList.toggle('hidden', !!room);
+      // Los amigos todavía son los de Firebase (G.DB.fb): sin él, fuera hasta el paso 6.
+      $('fr-online').classList.toggle('hidden', !G.DB.fb);
       $('fr-me').innerHTML = 'Tu apodo: <b class="gold" translate="no">' + esc(G.Social.me ? G.Social.me.name : '') + '</b> · dáselo a tus amigos para que te añadan.';
       $('fr-room').classList.toggle('hidden', !room);
       const list = G.Social.friends.sort((a, b) => {
@@ -374,6 +316,8 @@
 
   G.LobbyUI = (() => {
     let membersKey = '', hintKey = '', codeKey = '';
+    // Invitar: con los amigos (los de Firebase hasta el paso 6, como en Amigos).
+    const INVITE = () => !!G.DB.fb;
 
     function init() {
       $('lobby-leave').onclick = async () => {
@@ -391,8 +335,8 @@
           G.Net.open(room.id, room.isHost, room.host);
           G.Net.setLanIp(room.isHost ? room.lanIp || null : null);
           // En partida la lista de la sala no echa a nadie (puede faltar alguien un
-          // momento por un corte con la base de datos): manda el canal directo.
-          if (!G.Coop.active && !room.lost) G.Net.syncMembers(room.members.map(m => m.uid));
+          // momento por un corte): manda la conexión de cada uno.
+          if (!G.Coop.active) G.Net.syncMembers(room.members.map(m => m.uid));
         } else if (G.Net.open_) G.Net.close();
         if (what === 'room-closed') {
           G.UI.toast('La sala se ha cerrado', 2600);
@@ -414,20 +358,13 @@
 
     function close() { G.UI.hide('scr-lobby'); }
 
-    function connText(m, room) {
-      if (m.uid === room.host) return 'Anfitrión';
-      if (relayOn()) return pathBadge(m, room).text;
-      if (!room.isHost) return m.uid === G.Social.uid ? 'Tú' : 'En la sala';
-      const mode = G.Net.mode(m.uid);
-      return mode === 'direct' ? (G.Net.viaTurn(m.uid) ? 'Conectado (por servidor)' : G.Net.lanIp ? 'Conectado (local)' : 'Conectado') : mode === 'relay' ? 'Conectado (por servidor)' : mode === 'failed' ? 'No se pudo conectar (reintentando…)' : 'Conectando…';
-    }
+    const connText = (m, room) => (m.uid === room.host ? 'Anfitrión' : pathBadge(m, room).text);
 
     function render() {
       const room = G.Social.room;
       if (!room) return;
       const ms = room.members;
-      const relay = relayOn();
-      $('lobby-sub').textContent = room.isHost && relay && room.code
+      $('lobby-sub').textContent = room.isHost && room.code
         ? 'Eres el anfitrión. Comparte el código o invita a tus amigos (hasta ' + G.Social.MAX_PLAYERS + ') y empezad cuando estéis.'
         : room.isHost
         ? 'Eres el anfitrión. Invita a tus amigos (hasta ' + G.Social.MAX_PLAYERS + ') y empezad cuando estéis.'
@@ -457,23 +394,14 @@
         if (!m) return;
         const t = connText(m, room);
         el.textContent = t;
-        el.className = relay && m.uid !== room.host ? 'conn badge b-' + pathBadge(m, room).kind
-          : 'conn' + (t === 'Conectando…' ? ' wait' : '');
+        el.className = m.uid !== room.host ? 'conn badge b-' + pathBadge(m, room).kind : 'conn';
       });
 
-      // Misma wifi: la IP con la que entran los demás, y qué hacer si alguien no conecta.
-      // (Con el servidor propio no se entra por IP: sólo queda «Conectar en local».)
-      const lan = $('lobby-lan');
-      const showLan = !relay && room.isHost && room.lanIp;
-      lan.classList.toggle('hidden', !showLan);
-      if (showLan) {
-        lan.innerHTML = `<small class="sub">Tus amigos en la misma wifi entran con</small><div class="lan-ip" translate="no">${esc(room.lanIp)}</div>`;
-      }
-      const hint = relay ? null : lanHint(room, ms);
-      if (relay) renderLocal(room, ms); else renderHint(hint);
+      // Misma wifi: «Conectar en local» si un invitado de tu red va por el servidor.
+      renderLocal(room, ms);
 
       // Invitar (sólo el anfitrión y si queda sitio).
-      const canInvite = room.isHost && ms.length < G.Social.MAX_PLAYERS;
+      const canInvite = INVITE() && room.isHost && ms.length < G.Social.MAX_PLAYERS;
       $('lobby-inv-title').classList.toggle('hidden', !canInvite);
       const inv = $('lobby-invite');
       inv.classList.toggle('hidden', !canInvite);
@@ -495,70 +423,19 @@
 
       const btn = $('lobby-start');
       btn.classList.toggle('hidden', !room.isHost);
-      // Con el servidor propio nadie se queda sin conectar (si no va directo, va por el servidor).
-      const waiting = m => relay ? ['wait', 'away'].includes(pathBadge(m, room).kind) : G.Net.mode(m.uid) === 'connecting';
-      const connecting = ms.some(m => m.uid !== room.host && waiting(m));
-      const failed = !relay && ms.some(m => m.uid !== room.host && G.Net.mode(m.uid) === 'failed');
-      btn.disabled = !room.isHost || ms.length < 2 || connecting || failed;
+      // Nadie se queda sin conectar: si no va directo, va por el servidor.
+      const connecting = ms.some(m => m.uid !== room.host && ['wait', 'away'].includes(pathBadge(m, room).kind));
+      btn.disabled = !room.isHost || ms.length < 2 || connecting;
       btn.textContent = 'Empezar partida (' + ms.length + '/' + G.Social.MAX_PLAYERS + ')';
       $('lobby-note').textContent = !room.isHost ? 'Cuando el anfitrión empiece, entraréis todos a la vez.'
         : ms.length < 2 ? 'Necesitas al menos un amigo en la sala.'
-        : failed && hint ? ''
-        : failed ? 'No se puede conectar con algún amigo: su red (o la tuya) no deja jugar en grupo. Probad con otra wifi o datos móviles; se reintenta solo.'
         : connecting ? 'Conectando con tus amigos…' : 'La partida empieza para todos a la vez.';
-    }
-
-    /*
-     * Misma wifi (28-10-2026). Si una pareja no conecta y los dos salen a internet
-     * por la misma IP pública (mismo router), el aviso de siempre no ayuda: el
-     * anfitrión puede escribir su IP local (ver net.js, lanCandidate). Con el modo
-     * local ya puesto y aun así sin conectar, la wifi no deja que los aparatos se
-     * hablen (o la IP no es la de este aparato).
-     * -> null | { kind: 'offer' | 'blocked' | 'ask', name }
-     */
-    function lanHint(room, ms) {
-      if (room.isHost) {
-        const f = ms.find(m => m.uid !== room.host && G.Net.mode(m.uid) === 'failed' && (room.lanIp || G.Net.sameNetwork(m.uid)));
-        return f ? { kind: room.lanIp ? 'blocked' : 'offer', name: f.name } : null;
-      }
-      if (G.Net.mode(room.host) !== 'failed' || !G.Net.sameNetwork(room.host)) return null;
-      return { kind: 'ask', name: (ms.find(m => m.uid === room.host) || {}).name || '' };
-    }
-
-    // Sólo se rehace si cambia (si no, se borraría lo que estás escribiendo).
-    function renderHint(h) {
-      const box = $('lobby-hint');
-      const key = h ? h.kind + '|' + h.name + '|' + (G.Social.room.lanIp || '') : '';
-      if (key === hintKey) return;
-      hintKey = key;
-      box.classList.toggle('hidden', !h);
-      if (!h) { box.innerHTML = ''; return; }
-      const name = esc(h.name);
-      if (h.kind === 'ask') {
-        box.innerHTML = `<span>Estás en la misma wifi que ${name}. Pide al anfitrión que active el modo local.</span>`;
-        return;
-      }
-      box.innerHTML = (h.kind === 'offer'
-        ? `<span>Estás en la misma wifi que ${name}. Usa el modo local para conectar directo.</span>`
-        : `<span>No se llega al aparato de ${name}. Algunas wifis (de invitados o de hotel) no dejan que los aparatos se hablen. Prueba con la zona wifi de un móvil, o revisa que la IP sea la de este aparato.</span>`) +
-        `<form class="row" autocomplete="off"><input class="field" maxlength="15" inputmode="decimal" spellcheck="false" aria-label="Tu IP local" placeholder="Tu IP local">` +
-        `<button class="btn small gold" type="submit">${h.kind === 'offer' ? 'Conectar en local' : 'Cambiar IP'}</button></form>` +
-        `<p class="err"></p>`;
-      const input = box.querySelector('input');
-      input.value = G.Social.room.lanIp || lastIp();
-      box.querySelector('form').onsubmit = async e => {
-        e.preventDefault();
-        const r = await G.Social.setLocal(input.value);
-        if (!r.ok) { box.querySelector('.err').textContent = errText(r); G.Audio.sfx('error'); return; }
-        saveIp(input.value.trim());
-        G.Audio.sfx('confirm');
-      };
     }
 
     /** El código de la sala: cuatro Pokémon (con su nombre en tu idioma) y «Copiar código». */
     function renderCode(room) {
       const box = $('lobby-code');
-      const code = relayOn() && Array.isArray(room.code) && room.code.length === 4 ? room.code : null;
+      const code = Array.isArray(room.code) && room.code.length === 4 ? room.code : null;
       const key = code ? code.join('-') : '';
       if (key === codeKey) return;
       codeKey = key;
@@ -588,10 +465,10 @@
     }
 
     /*
-     * Servidor propio: si un invitado está en tu misma wifi pero juega por el servidor
-     * (la conexión directa no abrió), el anfitrión puede poner su IP local
-     * (G.Social.setLocal, de la misma wifi) y los de esa wifi vuelven a ir directos.
-     * Sustituye a los avisos de lanHint / renderHint.
+     * Si un invitado está en tu misma wifi (lo dice el servidor: sameNet) pero juega
+     * por el servidor (la conexión directa no abrió), el anfitrión puede poner su IP
+     * local (G.Social.setLocal) y los de esa wifi vuelven a ir directos.
+     * Sólo se rehace si cambia (si no, se borraría lo que estás escribiendo).
      */
     function renderLocal(room, ms) {
       const g = room.isHost && G.Social.setLocal
@@ -672,6 +549,6 @@
   G.SocialUI = {
     init() { G.NickUI.init(); G.FriendsUI.init(); G.LobbyUI.init(); G.InvitePop.init(); },
     withNick, needOnline,
-    relayError, pathBadge, fillCode   // (servidor propio; también para tests/lobby-ui.test.cjs)
+    relayError, pathBadge, fillCode   // (también para tests/lobby-ui.test.cjs)
   };
 })();

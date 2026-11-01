@@ -1,30 +1,20 @@
 /* ============ social.js: apodo, amigos, invitaciones y salas ============
- * Sólo funciona con cuenta en la nube (G.DB.online). Usa:
+ * Sólo funciona con cuenta en el servidor del juego (G.DB.online).
  *
- *   Firestore
- *     names/{apodo en minúsculas}  { uid }               apodos únicos
- *     profiles/{uid}               { name, lower, at }   apodo público
- *     friendships/{uidA_uidB}      { users, from, to, status: 'pending'|'ok', names, at }
- *
- *     pres/{uid}                   (el "en línea", quitado el 20-10-2026: sólo se borra con la cuenta)
- *     inv/{para_de}                { to, from, room, code?, name, at } invitaciones
- *                                  (code: el código de la sala, sólo con el servidor propio)
- *
- *   Realtime Database: SÓLO mientras estás en una sala o partida en grupo
- *     rooms/{id}          { host, open, at, m: { uid: { name, dex, shiny } }, q: ..., lan? }
- *                         la sala; q/ son los mensajes de net.js; lan, la clave de
- *                         «Entrar por IP» (ver setLocal)
- *
- *   Servidor propio (G.Relay, sólo con ?relay; docs/relay-coop, paso 4)
+ *   Salas: en el servidor (G.Relay, js/net/relay.js; docs/relay-coop/02-protocol.md)
  *     La sala vive en el servidor y es él quien manda en ella: crear, entrar,
  *     salir, empezar y acabar son eventos del socket, y la lista llega en el
- *     evento 'room'. Entonces no se toca la Realtime Database (ni rooms/ ni rin/).
- *     La sala se llama por su código: cuatro números de la Pokédex en orden
- *     (room.id = '25-95-151-133'). Ver «salas en el servidor» más abajo.
+ *     evento 'room'. La sala se llama por su código: cuatro números de la
+ *     Pokédex en orden (room.id = '25-95-151-133'). Ver «salas» más abajo.
+ *     start() abre el socket al entrar en la cuenta y stop() lo cierra al salir.
+ *     Si recargas la página estando en una sala (en los 30 s que el servidor te
+ *     guarda el hueco), al volver a conectar la sala vuelve sola.
  *
- * Por qué así: el plan gratuito de Firebase sólo admite 100 conexiones a la
- * vez a la Realtime Database. Si todo el mundo estuviera conectado, ése sería
- * el máximo de jugadores: sólo se conectan los que están en una sala.
+ *   Amigos, apodo, perfil e invitaciones: el código de Firestore de antes
+ *     (names/, profiles/, friendships/, inv/). Sin Firebase (G.DB.fb es null
+ *     desde el paso 2) no hace nada: el paso 6 lo pasa al servidor
+ *     (docs/relay-coop/10-step-6-friends.md). Mientras, el apodo es el nombre de
+ *     la cuenta.
  *
  * El resto del juego escucha los cambios con G.Social.on(fn).
  */
@@ -57,29 +47,37 @@ G.Social = (() => {
   let unFriends = null;
   let listening = false, unInv = null;  // listening: ya se ha puesto en marcha (online)
   const sentInv = new Map();        // a quién invitaste: uid -> { room, at } (para retirarlo al salir)
-  let room = null;                  // { id, host, isHost, members: [{ uid, name, dex, shiny }] }
-                                    // (con el servidor, además relay, code, mode, state y, por
-                                    // jugador, online, path, sameNet, hideIp: ver fromSnap)
-  let roomRefs = [];
+  let room = null;                  // { id, host, isHost, code, mode, state, members: [{ uid, name, dex,
+                                    // shiny, online, path, sameNet, hideIp }] } (ver fromSnap)
   const invites = new Map();        // fromUid -> { from, name, room, code?, at }
   const listeners = new Set();
   let started = false;
 
   function emit(what) { listeners.forEach(fn => { try { fn(what); } catch (e) { console.warn(e); } }); }
-  const ts = () => firebase.database.ServerValue.TIMESTAMP;
   const fts = () => firebase.firestore.FieldValue.serverTimestamp();
   const msOf = v => (v && v.toMillis ? v.toMillis() : +v || 0);
 
   // ---------------- arranque ----------------
 
-  /** Tras iniciar sesión. → 'ok' | 'need-nick' | 'off' (sin nube) */
+  /** Tras iniciar sesión. → 'ok' | 'need-nick' | 'off' (sin cuenta en el servidor) */
   async function start() {
-    // Sin Firebase (G.DB.fb, desde el paso 2) no hay amigos todavía: como sin nube.
-    if (!G.DB.online || !G.DB.fb) return 'off';
+    if (!G.DB.online || !G.DB.me) return 'off';
     if (started) return me ? 'ok' : 'need-nick';
-    fb = G.DB.fb; uid = fb.uid;
     started = true;
     measureSkew();
+    // Las salas, por el servidor: el socket se abre ya (y si la página se recargó
+    // estando en una sala, el servidor la manda y se vuelve a ella, ver adopt).
+    uid = G.DB.me.uid;
+    hookRelay();
+    if (G.Relay && G.Relay.enabled) {
+      G.Relay.connect().then(() => adopt(G.Relay.room), e => console.warn('[Social] socket:', e.code || e.message));
+    }
+    // Sin Firebase (paso 6): el apodo es el nombre de la cuenta y no hay amigos todavía.
+    fb = G.DB.fb || null;
+    if (!fb) {
+      me = { uid, name: G.DB.me.name || G.DB.user || '' };
+      return 'ok';
+    }
     // El apodo no cambia nunca: se recuerda en este navegador y así no se lee
     // el perfil en cada visita (una lectura menos por jugador y sesión).
     const NICK = 'ps.nick.' + uid;
@@ -139,7 +137,6 @@ G.Social = (() => {
   function online() {
     if (listening) return;                    // ya estaba en marcha
     listening = true;
-    if (fb.rtdb) fb.rtdb.goOffline();         // se conecta sólo al entrar en una sala
     let known = false;
     try { known = localStorage.getItem(hasFrKey()) === '1'; } catch (e) { /* nada */ }
     if (known) listenInvites();
@@ -174,21 +171,22 @@ G.Social = (() => {
   const presKey = () => 'ps.pres.' + uid;    // (sólo para borrar lo que quedó de entonces)
   function setPlaying(p) {
     playing = !!p;
-    if (room && room.relay) relayRun(playing);
+    if (room) relayRun(playing);
     // Al acabar la partida, la sala se vuelve a comprobar (los que se fueron, fuera).
-    if (!playing && room) { if (room.lost) room.tries = 0; emit('room'); }
+    if (!playing && room) emit('room');
   }
 
   async function stop(why) {
     if (!started) return;
     await leaveRoom().catch(() => {});
+    if (G.Relay) G.Relay.disconnect();          // (el leave sale antes: el socket va en orden)
     if (unFriends) { unFriends(); unFriends = null; }
     if (unInv) { unInv(); unInv = null; }
     listening = false; friendsReady = null;
     try { localStorage.removeItem(presKey()); } catch (e) { /* nada */ }
     if (why === 'delete') {
       try { localStorage.removeItem('ps.nick.' + uid); } catch (e) { /* nada */ }
-      await deleteAll().catch(e => console.warn('[Social] borrar:', e));
+      if (fb) await deleteAll().catch(e => console.warn('[Social] borrar:', e));
     }
     friends.clear(); invites.clear(); sentInv.clear();
     me = null; started = false; fb = null; uid = null; playing = false;
@@ -284,263 +282,27 @@ G.Social = (() => {
   }
 
   // ---------------- salas ----------------
-
-  /** Tu apodo y tu Pokémon, como se ven en la sala. */
-  function pokeInfo() {
-    const s = G.DB.save;
-    return { name: me ? me.name : '', dex: s.partner, shiny: !!s.partnerShiny && G.DB.ownsShiny(s.partner) };
-  }
-  function memberInfo() { return Object.assign(pokeInfo(), { at: ts() }); }
-
-  /**
-   * La Realtime Database sólo se conecta mientras estás en una sala: cada
-   * conexión abierta gasta descargas (se pagan a partir de 360 MB al día).
-   * (El 11-10-2026 hubo un contador de gente en línea que la tenía siempre
-   * conectada; se quitó por eso.)
-   */
-  function rtOn() { if (fb.rtdb) fb.rtdb.goOnline(); }
-  function rtOff() { if (fb && fb.rtdb && !room) fb.rtdb.goOffline(); }
-
   /*
-   * Salas con límite (25-10-2026): el 23-10 una cuenta creada fuera del juego
-   * llenó la base de datos con 19.691 salas de basura (100 GB, ~17 $ al día).
-   * Ahora (database.rules.json) cada cuenta tiene UNA sala, que se llama como
-   * ella; el anfitrión sólo puede poner en su sala a quien haya entrado de
-   * verdad (rin/{sala}/{uid}, que sólo escribe cada invitado), y los mensajes
-   * son pequeños y van a huecos fijos (net.js).
-   */
-  const rinRef = (id, u = uid) => fb.rtdb.ref('rin/' + id + '/' + u);
-
-  /** opts (sólo con el servidor): { mode: 'direct' | 'server' } o el modo tal cual. */
-  async function createRoom(opts) {
-    if (room) return room;
-    if (relayOn()) return creating || (creating = relayCreate(opts).finally(() => { creating = null; }));
-    rtOn();
-    const id = uid;
-    await fb.rtdb.ref('rooms/' + id).set({ host: uid, open: true, at: ts(), m: { [uid]: memberInfo() } });
-    enterRoom(id, uid);
-    return room;
-  }
-
-  async function joinRoom(id) {
-    if (relayOn()) return relayJoin(id);
-    if (room && room.id === id) return { ok: true };
-    if (room) await leaveRoom();
-    rtOn();
-    let open = null, host = null;
-    try {
-      open = (await fb.rtdb.ref('rooms/' + id + '/open').get()).val();
-      host = (await fb.rtdb.ref('rooms/' + id + '/host').get()).val();
-    } catch (e) { /* sala borrada */ }
-    if (!host) { rtOff(); return { ok: false, error: 'Esa sala ya no existe.' }; }
-    if (open !== true) { rtOff(); return { ok: false, error: 'La partida de esa sala ya ha empezado.' }; }
-    // (Con las reglas de antes de rin no se puede escribir: se sigue igual.)
-    await rinRef(id).set(true).catch(() => {});
-    try { await fb.rtdb.ref('rooms/' + id + '/m/' + uid).set(memberInfo()); }
-    catch (e) { rtOff(); return { ok: false, error: 'No se pudo entrar en la sala.' }; }
-    const n = (await fb.rtdb.ref('rooms/' + id + '/m').get()).numChildren();
-    if (n > MAX_PLAYERS) {
-      await fb.rtdb.ref('rooms/' + id + '/m/' + uid).remove();
-      rtOff();
-      return { ok: false, error: 'La sala está llena (máximo ' + MAX_PLAYERS + ').' };
-    }
-    enterRoom(id, host);
-    return { ok: true };
-  }
-
-  function enterRoom(id, host) {
-    room = { id, host, isHost: host === uid, members: [], open: true, lost: false };
-    watchRoom(id);
-    emit('room');
-  }
-
-  function watchRoom(id) {
-    detachRoom();
-    const mref = fb.rtdb.ref('rooms/' + id + '/m');
-    mref.on('value', s => {
-      if (!room || room.id !== id) return;
-      const m = s.val() || {};
-      if (!m[uid]) { lostRoom(id); return; }          // tu plaza ya no está (corte)
-      const prev = room.members;
-      // El anfitrión siempre primero; el resto por orden de llegada.
-      room.members = Object.keys(m).map(k => Object.assign({ uid: k }, m[k]))
-        .sort((a, b) => (a.uid === room.host ? -1 : b.uid === room.host ? 1 : (a.at || 0) - (b.at || 0)));
-      if (room.isHost && playing) keepMates(id, prev);
-      emit('room');
-    }, () => lostRoom(id));
-    const href = fb.rtdb.ref('rooms/' + id + '/host');
-    href.on('value', s => { if (room && room.id === id && !s.val()) lostRoom(id); }, () => lostRoom(id));
-    const oref = fb.rtdb.ref('rooms/' + id + '/open');
-    oref.on('value', s => { if (room && room.id === id) { room.open = s.val() === true; emit('room'); } }, () => {});
-    // Tras un corte el servidor ya ha hecho el onDisconnect: hay que volver a dejarlo puesto.
-    const cref = fb.rtdb.ref('.info/connected');
-    cref.on('value', s => { if (s.val() === true && room && room.id === id) watchRoomDisconnect(); });
-    roomRefs = [mref, href, oref, cref];
-  }
-
-  /** Si se cierra el navegador, la sala (anfitrión) o tu plaza (invitado) se borran solas. */
-  function watchRoomDisconnect() {
-    if (!room) return;
-    const ref = room.isHost ? fb.rtdb.ref('rooms/' + room.id) : fb.rtdb.ref('rooms/' + room.id + '/m/' + uid);
-    ref.onDisconnect().remove();
-  }
-
-  function detachRoom() {
-    for (const r of roomRefs) r.off();
-    roomRefs = [];
-  }
-
-  /*
-   * Cortes de la Realtime Database (22-10-2026). Basta un corte de la conexión
-   * (red del móvil, pestaña dormida, o el tope de 100 conexiones del plan
-   * gratuito al reconectar) para que el servidor haga el onDisconnect: borra la
-   * plaza del invitado (y al volver ya no le deja leer la sala) o la sala entera
-   * si es el anfitrión. Antes eso era «La sala se ha cerrado» y fuera de la
-   * partida, aunque el canal directo con los demás siguiera bien.
-   * Ahora la sala no se da por cerrada a la primera: se recupera (el anfitrión
-   * la vuelve a escribir con los que había; el invitado vuelve a poner su plaza)
-   * y, durante una partida, nunca se cierra: la partida va por el canal directo.
-   */
-  const REJOIN_MS = 4000, REJOIN_TRIES = 3;
-
-  function lostRoom(id) {
-    if (!room || room.id !== id || room.lost) return;
-    detachRoom();
-    room.lost = true;
-    room.tries = 0;
-    rejoin(id);
-  }
-
-  const within = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(Error('timeout')), ms))]);
-
-  async function rejoin(id) {
-    if (!room || room.id !== id || !room.lost) return;
-    const base = fb.rtdb.ref('rooms/' + id);
-    try {
-      const host = (await within(base.child('host').get(), 5000)).val();
-      if (!room || room.id !== id) return;
-      if (room.isHost) {
-        // El servidor borró tu sala: se vuelve a escribir igual (misma id) con los que había.
-        if (host !== uid) {
-          if (host) throw Error('otra');
-          const m = {};
-          for (const x of room.members) m[x.uid] = { name: x.name, dex: x.dex, shiny: !!x.shiny, at: x.at || 0 };
-          m[uid] = Object.assign(memberInfo(), m[uid] ? { at: m[uid].at } : {});
-          await within(base.set(Object.assign({ host: uid, open: playing ? false : room.open, at: ts(), m }, room.lan ? { lan: room.lan } : {})), 5000);
-        }
-      } else {
-        if (!host) throw Error('sin anfitrión');
-        const mine = room.members.find(x => x.uid === uid);
-        await within(rinRef(id).set(true), 5000).catch(() => {});
-        // Si no deja, los demás siguen jugando (la sala no admite a nadie hasta que acaben): a esperar.
-        await within(base.child('m/' + uid).set(Object.assign(memberInfo(), mine && mine.at ? { at: mine.at } : {})), 5000)
-          .catch(e => { throw Object.assign(e, { wait: e.message !== 'timeout' }); });
-      }
-    } catch (e) {
-      if (!room || room.id !== id) return;
-      // En partida se sigue intentando sin prisa; fuera, tras unos intentos, la sala se da
-      // por cerrada (pero no mientras el anfitrión siga en ella con la partida en marcha).
-      if (!playing && !e.wait && ++room.tries >= REJOIN_TRIES) { closedRoom(); return; }
-      setTimeout(() => rejoin(id), playing || e.wait ? 2 * REJOIN_MS : REJOIN_MS);
-      return;
-    }
-    if (!room || room.id !== id) return;
-    room.lost = false;
-    watchRoom(id);
-    watchRoomDisconnect();
-  }
-
-  /**
-   * Anfitrión en partida: si la plaza de un invitado desaparece pero sigue en
-   * la partida (aunque se esté reconectando, ver coop.js), ha sido un corte suyo
-   * con la base de datos: se le vuelve a poner. Sin plaza no podría ni leer la
-   * sala ni contestar al anfitrión para volver a conectar.
-   */
-  function keepMates(id, prev) {
-    for (const x of prev) {
-      if (x.uid === uid || room.members.some(m => m.uid === x.uid)) continue;
-      setTimeout(() => {
-        if (!room || room.id !== id || !playing || room.members.some(m => m.uid === x.uid)) return;
-        if (!G.Coop.keeps(x.uid)) return;
-        fb.rtdb.ref('rooms/' + id + '/m/' + x.uid).set({ name: x.name, dex: x.dex, shiny: !!x.shiny, at: x.at || 0 }).catch(() => {});
-      }, 3000);
-    }
-  }
-
-  /** Anfitrión: quita a alguien de la sala (se cortó en partida y no volvió). */
-  function dropMember(u) {
-    if (room && room.relay) {
-      if (room.isHost && u !== uid) G.Relay.request('kick', { uid: u }).catch(e => console.warn('[Social] kick:', e.code || e.message));
-      return;
-    }
-    if (room && room.isHost && u !== uid) fb.rtdb.ref('rooms/' + room.id + '/m/' + u).remove().catch(() => {});
-  }
-
-  function closedRoom() {
-    if (!room) return;
-    const r = room;
-    if (!r.relay) detachRoom();
-    room = null;
-    retractInvites();
-    if (!r.relay) rtOff();
-    emit('room-closed');
-  }
-
-  async function leaveRoom() {
-    if (!room && creating) { relayGen++; return; }      // aún creándose: se deshace al llegar la respuesta
-    if (!room) return;
-    const r = room;
-    if (r.relay) {
-      relayGen++;
-      room = null;
-      // Sin esperar la respuesta: el socket manda los eventos en orden (un join
-      // después llega detrás) y, sin conexión, el servidor libera la plaza solo.
-      G.Relay.request('leave', {}).catch(() => {});
-      retractInvites();
-      emit('room');
-      return;
-    }
-    detachRoom();
-    room = null;
-    const ref = r.isHost ? fb.rtdb.ref('rooms/' + r.id) : fb.rtdb.ref('rooms/' + r.id + '/m/' + uid);
-    ref.onDisconnect().cancel().catch(() => {});
-    await ref.remove().catch(() => {});
-    if (!r.isHost) rinRef(r.id).remove().catch(() => {});
-    retractInvites();
-    rtOff();
-    emit('room');
-  }
-
-  /** El anfitrión cierra la sala a nuevos jugadores al empezar la partida. */
-  function setOpen(open) {
-    if (room && room.relay) { relayRun(!open); return; }     // con el servidor, va con start / end
-    if (room && room.isHost) fb.rtdb.ref('rooms/' + room.id + '/open').set(!!open).catch(() => {});
-  }
-
-  /** Actualiza tu Pokémon en la sala (si cambias de compañero). */
-  function refreshMember() {
-    if (room && me && room.relay) { G.Relay.emit('member', pokeInfo()); return; }
-    if (room && me) fb.rtdb.ref('rooms/' + room.id + '/m/' + uid).update(
-      { dex: G.DB.save.partner, shiny: !!G.DB.save.partnerShiny && G.DB.ownsShiny(G.DB.save.partner) }).catch(() => {});
-  }
-
-  // ---------------- salas en el servidor (G.Relay) ----------------
-  /*
-   * Con ?relay (G.Relay.enabled) la sala está en el servidor propio, que manda en
-   * ella (docs/relay-coop/07-step-4-room-codes.md):
+   * La sala está en el servidor, que manda en ella:
    *   createRoom -> create { mode }        joinRoom    -> join { code, hideIp }
    *   leaveRoom  -> leave                  refreshMember -> member { name, dex, shiny }
    *   setPlaying / setOpen -> start / end (una sala en partida no admite a nadie)
    *   dropMember -> kick { uid }
    * y del servidor llegan 'room' (la sala entera), 'peer' (alguien se corta,
    * vuelve o pierde la plaza) y 'closed' (la sala se acabó: emit('room-closed')).
-   * La sala que ve la interfaz es la de siempre, más code, mode, state y, por
-   * jugador, online, path, sameNet y hideIp.
+   * La sala que ve la interfaz: id, host, isHost, members, más code, mode, state y,
+   * por jugador, online, path, sameNet y hideIp.
    * Los fallos son Error con .code ('not-found', 'full', 'started', 'rate',
-   * 'old-version', 'bad-token', 'busy', 'unreachable', 'timeout'...): el texto
-   * lo pone la interfaz. joinRoom devuelve { ok: false, code, error }.
+   * 'old-version', 'signed-out', 'banned', 'busy', 'unreachable', 'timeout'...): el
+   * texto lo pone la interfaz. joinRoom devuelve { ok: false, code, error }.
    */
-  const relayOn = () => !!(G.Relay && G.Relay.enabled);
+
+  /** Tu apodo y tu Pokémon, como se ven en la sala. */
+  function pokeInfo() {
+    const s = G.DB.save;
+    return { name: me ? me.name : '', dex: s.partner, shiny: !!s.partnerShiny && G.DB.ownsShiny(s.partner) };
+  }
+
   const codeKey = c => (Array.isArray(c) ? c.join('-') : '');
   const hideIp = () => !!(G.Settings && G.Settings.get && G.Settings.get('coopHideIp'));
   function codeErr(code) { const e = Error(code); e.code = code; return e; }
@@ -569,17 +331,19 @@ G.Social = (() => {
       // El anfitrión siempre primero; el resto en el orden del servidor (el de llegada).
       .sort((a, b) => (a.uid === host ? -1 : b.uid === host ? 1 : 0));
     // run: lo último que pidió el anfitrión (start / end); sólo lo cambia relayRun.
-    return Object.assign(r || { lost: false, run: s.state === 'playing' }, {
+    return Object.assign(r || { run: s.state === 'playing' }, {
       id: codeKey(s.code) || (r && r.id) || host, code: Array.isArray(s.code) ? s.code.slice() : r ? r.code : null,
-      relay: true, mode: s.mode === 'server' ? 'server' : 'direct', state: s.state,
+      mode: s.mode === 'server' ? 'server' : 'direct', state: s.state,
       directWaitMs: s.directWaitMs, host, isHost: host === uid, members, open: s.state !== 'playing'
     });
   }
 
   let hooked = false, creating = null;
   let relayGen = 0;                 // sube al salir: una respuesta de create / join de antes ya no vale
+  let leftId = '';                  // la última sala de la que saliste (no se vuelve a ella sola)
+  let joining = 0;                  // join en camino: su foto llega antes que la respuesta (no es una recarga)
   function hookRelay() {
-    if (hooked) return;
+    if (hooked || !G.Relay) return;
     hooked = true;
     G.Relay.on('room', onRelayRoom);
     G.Relay.on('peer', onRelayPeer);
@@ -587,7 +351,8 @@ G.Social = (() => {
   }
 
   function onRelayRoom(s) {
-    if (!room || !room.relay || !s) return;
+    if (!s) return;
+    if (!room) { adopt(s); return; }
     const k = codeKey(s.code);
     if (k ? k !== room.id : s.host !== room.host) return;            // otra sala (una de antes)
     if (!(s.members || []).some(m => m && m.uid === uid)) { closedRoom(); return; }   // ya no estás
@@ -595,8 +360,23 @@ G.Social = (() => {
     emit('room');
   }
 
+  /*
+   * El servidor te tiene en una sala y aquí no hay ninguna: has recargado la página
+   * (o se cerró la pestaña) y has vuelto en los 30 s que te guarda el hueco. Se
+   * vuelve a ella. Si eras el anfitrión y estaba en partida, se acaba (la partida
+   * se perdió al recargar) para que la sala vuelva a admitir gente.
+   */
+  function adopt(s) {
+    if (room || creating || joining || !started || !s || !uid) return;
+    const k = codeKey(s.code);
+    if (!k || k === leftId || !(s.members || []).some(m => m && m.uid === uid)) return;
+    room = fromSnap(s, null);
+    if (room.isHost && room.run && !(G.Coop && G.Coop.active)) relayRun(false);
+    emit('room');
+  }
+
   function onRelayPeer(u, st) {
-    if (!room || !room.relay) return;
+    if (!room) return;
     const m = room.members.find(x => x.uid === u);
     if (!m) return;
     if (st === 'gone') room.members = room.members.filter(x => x !== m);
@@ -605,7 +385,13 @@ G.Social = (() => {
   }
 
   function onRelayClosed() {
-    if (room && room.relay) closedRoom();
+    if (room) closedRoom();
+  }
+
+  /** opts: { mode: 'direct' | 'server' } o el modo tal cual. */
+  function createRoom(opts) {
+    if (room) return Promise.resolve(room);
+    return creating || (creating = relayCreate(opts).finally(() => { creating = null; }));
   }
 
   async function relayCreate(opts) {
@@ -615,6 +401,7 @@ G.Social = (() => {
     let a;
     try {
       await G.Relay.connect();
+      leftId = '';
       a = await G.Relay.request('create', { mode });
     } catch (e) { throw asErr(e); }
     if (gen !== relayGen || room) {           // saliste (o entraste en otra) mientras tanto
@@ -628,7 +415,7 @@ G.Social = (() => {
     return room;
   }
 
-  async function relayJoin(x) {
+  async function joinRoom(x) {
     const code = toCode(x);
     if (!code) return failed(codeErr('not-found'));
     if (room && room.id === codeKey(code)) return { ok: true };
@@ -636,10 +423,13 @@ G.Social = (() => {
     hookRelay();
     const gen = relayGen;
     let a;
+    joining++;
     try {
       await G.Relay.connect();
+      leftId = '';
       a = await G.Relay.request('join', { code, hideIp: hideIp() });
     } catch (e) { return failed(e); }
+    finally { joining--; }
     if (gen !== relayGen || room) {           // saliste mientras tanto: fuera también en el servidor
       if (!room) G.Relay.request('leave', {}).catch(() => {});
       return failed(codeErr('left'));
@@ -653,81 +443,80 @@ G.Social = (() => {
     return { ok: true, sameNet: room.sameNet };
   }
 
-  /** Anfitrión: empieza (on) o acaba la partida en el servidor, una sola vez por cambio. */
+  /** Anfitrión: quita a alguien de la sala (se cortó en partida y no volvió). */
+  function dropMember(u) {
+    if (room && room.isHost && u !== uid) G.Relay.request('kick', { uid: u }).catch(e => console.warn('[Social] kick:', e.code || e.message));
+  }
+
+  function closedRoom() {
+    if (!room) return;
+    room = null;
+    retractInvites();
+    emit('room-closed');
+  }
+
+  async function leaveRoom() {
+    if (!room && creating) { relayGen++; return; }      // aún creándose: se deshace al llegar la respuesta
+    if (!room) return;
+    relayGen++;
+    leftId = room.id;
+    room = null;
+    // Sin esperar la respuesta: el socket manda los eventos en orden (un join
+    // después llega detrás) y, sin conexión, el servidor libera la plaza solo.
+    G.Relay.request('leave', {}).catch(() => {});
+    retractInvites();
+    emit('room');
+  }
+
+  /** El anfitrión cierra la sala a nuevos jugadores al empezar la partida (va con start / end). */
+  function setOpen(open) { relayRun(!open); }
+
+  /** Actualiza tu Pokémon en la sala (si cambias de compañero). */
+  function refreshMember() {
+    if (room && me) G.Relay.emit('member', pokeInfo());
+  }
+
+  /*
+   * Anfitrión: empieza (on) o acaba la partida en el servidor, una sola vez por cambio.
+   * El ack de 'start' trae la partida del ranking que abre el servidor (run, o null si
+   * estás solo): va a G.Ranking (setCoopRun) y queda en runId para cuando se suba.
+   */
+  let runId = null;
   function relayRun(on) {
-    if (!room || !room.relay || !room.isHost || room.run === on) return;
+    if (!room || !room.isHost || room.run === on) return;
     room.run = on;
     room.open = !on;
-    G.Relay.request(on ? 'start' : 'end', {}).catch(e => console.warn('[Social] ' + (on ? 'start' : 'end') + ':', e.code || e.message));
+    if (on) setRun(null);                      // (la de la partida de antes ya no vale)
+    G.Relay.request(on ? 'start' : 'end', {}).then(a => {
+      if (on) setRun(a && typeof a.run === 'string' && a.run ? a.run : null);
+    }, e => console.warn('[Social] ' + (on ? 'start' : 'end') + ':', e.code || e.message));
+  }
+  function setRun(run) {
+    runId = run;
+    if (G.Ranking && G.Ranking.setCoopRun) G.Ranking.setCoopRun(run);
   }
 
   // ---------------- misma wifi ----------------
   /*
-   * Salas locales (28-10-2026). En la misma wifi no se suele poder conectar sólo con
-   * STUN (ver net.js, lanCandidate): el anfitrión escribe su IP local y el juego la
-   * usa para conectar. Además la sala guarda rooms/{uid}/lan: 24 letras del SHA-256
-   * de «IP pública|IP local». Quien esté en la misma wifi (misma IP pública) y
-   * escriba esa IP la encuentra con una consulta exacta, sin ser amigos; desde otra
-   * red, la misma IP da otra clave y no encuentra nada. No queda ninguna IP legible.
-   * (La consulta necesita en database.rules.json el índice de lan y que sólo deje
-   * buscar así, de una en una.)
+   * En la misma wifi no se suele poder conectar sólo con STUN (ver net.js,
+   * lanCandidate). Si el servidor dice que un invitado está en tu red (sameNet) y va
+   * por el servidor, la sala ofrece «Conectar en local»: el anfitrión escribe su IP
+   * local y el juego la usa para conectar directo. La IP sólo se queda aquí
+   * (room.lanIp): no se manda a nadie.
    */
   const BAD_IP = 'Esa no es una IP local. Empieza por 192.168., 10. o 172.16 a 172.31.';
 
-  async function lanKey(pub, ip) {
-    const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pub + '|' + ip)));
-    let s = '';
-    for (const b of h) s += String.fromCharCode(b);
-    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').slice(0, 24);
-  }
-
-  /**
-   * Anfitrión: pone su sala (la crea si hace falta) en modo misma wifi con su IP.
-   * La clave para «Entrar por IP» se escribe después, sin esperar (el STUN tarda).
-   */
+  /** Anfitrión: pone su sala (la crea si hace falta) en modo local con su IP. */
   async function setLocal(ip) {
     ip = String(ip || '').trim();
     if (!G.Net.isLocalIp(ip)) return { ok: false, error: BAD_IP };
     if (room && !room.isHost) return { ok: false, error: 'Sólo el anfitrión de la sala puede hacerlo.' };
     let r = room;
-    if (!r) {
-      // Con el servidor, si no se puede crear la sala, el fallo es el resultado (como en joinRoom).
-      if (relayOn()) { try { r = await createRoom(); } catch (e) { return failed(e); } }
-      else r = await createRoom();
-    }
+    // Si no se puede crear la sala, el fallo es el resultado (como en joinRoom).
+    if (!r) { try { r = await createRoom(); } catch (e) { return failed(e); } }
     r.lanIp = ip;
     emit('room');
-    if (r.relay) return { ok: true };       // con el servidor no hay «Entrar por IP» (se entra con el código)
-    G.Net.publicIp().then(async pub => {
-      if (!pub || room !== r || r.lanIp !== ip) return;
-      const key = await lanKey(pub, ip);
-      await fb.rtdb.ref('rooms/' + r.id + '/lan').set(key);
-      r.lan = key;
-    }).catch(() => { /* sin la clave sólo falla «Entrar por IP»: se puede invitar igual */ });
     return { ok: true };
-  }
-
-  /** Busca la sala local con esa IP en esta wifi. -> { ok, room: { id, name, n } } */
-  async function findLocal(ip) {
-    ip = String(ip || '').trim();
-    if (!G.Net.isLocalIp(ip)) return { ok: false, error: BAD_IP };
-    if (relayOn()) return failed(codeErr('not-found'));    // con el servidor se entra con el código
-    const pub = await G.Net.publicIp();
-    if (!pub) return { ok: false, error: 'No se pudo comprobar tu red. Revisa la conexión y prueba otra vez.' };
-    let key;
-    try { key = await lanKey(pub, ip); }
-    catch (e) { return { ok: false, error: 'No se pudo comprobar tu red. Revisa la conexión y prueba otra vez.' }; }
-    rtOn();
-    let found = null;
-    try {
-      const s = await fb.rtdb.ref('rooms').orderByChild('lan').equalTo(key).limitToFirst(1).get();
-      s.forEach(c => { if (!found) found = { id: c.key, v: c.val() || {} }; });
-    } catch (e) { console.warn('[Social] buscar sala local:', e.message); }   // sin permiso o sin red: como si no hubiera
-    rtOff();
-    if (!found || !found.v.host) return { ok: false, error: 'No hay ninguna sala en ' + ip + ' en esta wifi. Revisa el número y que estéis en la misma red.' };
-    if (found.v.open !== true) return { ok: false, error: 'La partida de esa sala ya ha empezado.' };
-    const m = found.v.m || {};
-    return { ok: true, room: { id: found.id, name: (m[found.v.host] || {}).name || '', n: Object.keys(m).length } };
   }
 
   // ---------------- invitaciones ----------------
@@ -737,17 +526,14 @@ G.Social = (() => {
     if (!f || f.status !== 'ok') return { ok: false, error: 'Sólo puedes invitar a tus amigos.' };
     if (room && room.members.length >= MAX_PLAYERS) return { ok: false, error: 'La sala está llena.' };
     if (room && !room.isHost) return { ok: false, error: 'Sólo el anfitrión de la sala puede invitar.' };
-    if (!room) {
-      if (relayOn()) { try { await createRoom(); } catch (e) { return failed(e); } }
-      else await createRoom();
-    }
+    if (!room) { try { await createRoom(); } catch (e) { return failed(e); } }
     // Acabas de invitarle a esta sala: ya la tiene (pulsar otra vez no escribe nada; 25-10-2026).
     const s = sentInv.get(other);
     if (s && s.room === room.id && now() - s.at < REINVITE_MS) return { ok: true, msg: 'Invitación enviada a ' + f.name };
     try {
-      // Con el servidor va también el código (room sigue ahí para los que aún no lo usan).
+      // Va también el código (room sigue ahí para los que aún no lo usan).
       await fb.fs.collection('inv').doc(other + '_' + uid).set(Object.assign(
-        { to: other, from: uid, room: room.id, name: me.name, at: fts() }, room.relay && room.code ? { code: room.code } : {}));
+        { to: other, from: uid, room: room.id, name: me.name, at: fts() }, room.code ? { code: room.code } : {}));
     } catch (e) { return { ok: false, error: 'No se pudo invitar (' + (e.code || 'error') + ').' }; }
     sentInv.set(other, { room: room.id, at: now() });
     return { ok: true, msg: 'Invitación enviada a ' + f.name };
@@ -780,7 +566,7 @@ G.Social = (() => {
     invites.delete(from);
     invDoc(from).delete().catch(() => {});
     emit('invites');
-    return joinRoom(relayOn() && inv.code ? inv.code : inv.room);
+    return joinRoom(inv.code || inv.room);
   }
 
   function declineInvite(from) {
@@ -867,7 +653,7 @@ G.Social = (() => {
   return {
     start, stop, claimNick, request, accept, remove, publishProfile, getProfile, profileData,
     createRoom, joinRoom, leaveRoom, setOpen, refreshMember, dropMember, setPlaying, ensureFriends,
-    invite, acceptInvite, declineInvite, setLocal, findLocal, lanKey,
+    invite, acceptInvite, declineInvite, setLocal,
     on(fn) { listeners.add(fn); }, off(fn) { listeners.delete(fn); },
     get me() { return me; },
     get started() { return started; },
@@ -875,6 +661,8 @@ G.Social = (() => {
     get invites() { return [...invites.values()]; },
     get room() { return room; },
     get uid() { return uid; },
+    /** Anfitrión: la partida en grupo del ranking de esta sala (del ack de 'start'), o null. */
+    get runId() { return runId; },
     /** La hora real (corrige el reloj del aparato si va desfasado). */
     now,
     VALID, MAX_PLAYERS

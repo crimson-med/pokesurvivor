@@ -30,25 +30,40 @@ test('create da un código de 4 números de la lista y una sala de espera', () =
   assert.equal(s.mode, 'direct');
   assert.equal(s.host, 'h');
   assert.equal(s.directWaitMs, 6000);
-  assert.deepEqual(s.members, [{ uid: 'h', name: 'h', dex: 25, shiny: false, online: true, path: null, sameNet: false, hideIp: false }]);
+  assert.deepEqual(s.members, [{ uid: 'h', name: 'h', dex: 25, shiny: false, online: true, path: null, sameNet: false, hideIp: false, ep: null }]);
 });
 
-test('create con { id }: la clave es el id y code es null', () => {
+test('sólo hay salas con código: create ignora un id y join no entra por uid', () => {
   const { r } = setup();
   const f = r.create('h', info('h'), { id: 'h' }, V);
   assert.equal(f.ok, true);
-  assert.equal(r.snapshot(f.room).code, null);
-  const g = r.join('h', 'g', info('g'), V);
-  assert.equal(g.ok, true);
-  assert.equal(r.snapshot(g.room).members.length, 2);
-  // Nadie puede crear con el id de otro (ni con uno con forma de código).
-  assert.equal(r.create('x', info('x'), { id: 'h' }, V).err, 'bad-id');
-  assert.equal(r.create('1-2-3-4', info('x'), { id: '1-2-3-4' }, V).err, 'bad-id');
-  assert.equal(r.roomOf('g').host, 'h');
-  // El anfitrión puede volver a crearla con su id: se cierra la vieja.
-  const again = r.create('h', info('h'), { id: 'h' }, V);
-  assert.equal(again.ok, true);
-  assert.equal(again.closed[0].why, 'host-left');
+  assert.equal(f.room.code.length, 4);
+  assert.equal(f.room.key, f.room.code.join('-'));
+  assert.equal(r.join('h', 'g', info('g'), V).err, 'not-found');
+  assert.equal(keyOf('h'), null);
+  assert.equal(keyOf('1-2-3'), null);
+  assert.equal(keyOf('1-2-3-4'), '1-2-3-4');
+});
+
+test('ep: cada jugador lleva el de su conexión; al volver con otro, cambia en la foto', () => {
+  const { r } = setup();
+  const code = host(r, 'h', 'direct', { ep: 'eh1' }).room.code;
+  guest(r, code, 'g', { ep: 'eg1' });
+  const ep = () => r.snapshot(r.roomOf('h')).members.map(m => [m.uid, m.ep]);
+  assert.deepEqual(ep(), [['h', 'eh1'], ['g', 'eg1']]);
+  r.path('h', 'g', 'server');
+  r.markAway('g', 's-g');
+  const back = r.markBack('g', { sid: 's-g2', ep: 'eg2' });
+  assert.ok(back.changed.has(r.roomOf('h')));
+  assert.deepEqual(ep(), [['h', 'eh1'], ['g', 'eg2']]);
+  assert.equal(r.roomOf('h').members.get('g').path, null, 'a reload redoes the connection: the old path is gone');
+  r.path('h', 'g', 'server');
+  // Un socket recuperado (sin ep nuevo) no lo cambia; volver a entrar con el código, sí.
+  r.markBack('g', { sid: 's-g2' });
+  assert.deepEqual(ep(), [['h', 'eh1'], ['g', 'eg2']]);
+  assert.equal(r.roomOf('h').members.get('g').path, 'server', 'a reconnect keeps it');
+  guest(r, code, 'g', { ep: 'eg3' });
+  assert.deepEqual(ep(), [['h', 'eh1'], ['g', 'eg3']]);
 });
 
 test('mode server se guarda; cualquier otra cosa es direct', () => {
