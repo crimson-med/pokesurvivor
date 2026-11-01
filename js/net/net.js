@@ -809,6 +809,29 @@ G.Net = (() => {
     handlers.forEach(fn => { try { fn(from, msg); } catch (e) { console.error('[Net] mensaje:', e); } });
   }
 
+  /**
+   * ¿Saldría ahora lo que se mande? Por el canal directo abierto o, con ?relay, por
+   * el servidor con nuestro socket conectado y el otro no caído ('away': el servidor
+   * tira lo que va a alguien desconectado). Si no, coop.js espera y guarda los eventos.
+   */
+  function ready(u) {
+    const p = peers.get(u);
+    if (p && p.dc && p.dc.readyState === 'open') return true;
+    return !!(relayOn && p && p.mode !== 'closed' && !p.away && G.Relay.state === 'online');
+  }
+
+  /**
+   * Bytes que le quedan por salir: lo que espera en el canal directo o, con ?relay
+   * y por el servidor, lo mandado al invitado y aún sin confirmar (0 si no llegan
+   * confirmaciones, ver busy).
+   */
+  function load(u) {
+    const p = peers.get(u);
+    if (p && p.dc && p.dc.readyState === 'open') return p.dc.bufferedAmount;
+    const st = relayOn && isHost && pairs.get(u);
+    return st && st.ackSeen ? st.bytes : 0;
+  }
+
   return {
     open, close, syncMembers, send, toHost, broadcast,
     on(fn) { handlers.add(fn); }, off(fn) { handlers.delete(fn); },
@@ -833,16 +856,9 @@ G.Net = (() => {
      * Con ?relay, por el servidor: lo mandado al invitado y aún sin confirmar (sólo
      * si llegan confirmaciones: un servidor que no las reenvía no lo atasca).
      */
-    busy(u) {
-      const p = peers.get(u);
-      if (p && p.dc && p.dc.readyState === 'open') return p.dc.bufferedAmount > BUSY_BYTES;
-      const s = relayOn && isHost && pairs.get(u);
-      return !!(s && s.ackSeen && s.bytes > BUSY_BYTES);
-    },
-    /** ¿Saldría ahora lo que se mande? Sin canal abierto, send() lo tira. */
-    ready(u) { const p = peers.get(u); return !!(p && p.dc && p.dc.readyState === 'open'); },
-    /** Bytes que le quedan por salir (0 sin canal abierto). */
-    load(u) { const p = peers.get(u); return p && p.dc && p.dc.readyState === 'open' ? p.dc.bufferedAmount : 0; },
+    busy(u) { return load(u) > BUSY_BYTES; },
+    ready,
+    load,
     peers() { return [...peers.keys()]; },
     get open_() { return !!roomId; },
     get isHost() { return isHost; },

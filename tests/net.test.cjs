@@ -972,3 +972,103 @@ test('relay: with G.Relay present but not enabled, signaling still goes through 
   assert.deepEqual(writes.map(([p, m]) => [p, m.sig.sdp.type]), [['rooms/room/q/a', 'offer']]);
   assert.equal(timers.at(-1), 9000);
 });
+
+// ---------------- coop.js sobre el camino del servidor (?relay) ----------------
+// El coop.js de verdad encima del net.js de verdad de cada uno, con el G.Relay falso.
+// ready, busy y load de net.js tienen que contar el camino por el servidor: si no,
+// coop.js no manda nada a una pareja que va por él y los eventos se amontonan.
+async function coopRelay(opts) {
+  const { w, host, guest } = await relayPair(opts);
+  let now = 1e6;
+  const performance = { now: () => now };
+  const mk = node => {
+    const G = { Net: node.N }, said = [];
+    G.Player = class { constructor() { this.maxHp = 300; } };
+    G.DEX_BY = { 25: { dex: 25 } }; G.baseStartOf = () => 'thundershock';
+    G.Sprites = { preload() {} }; G.U = { dist2: () => 0, clamp: (v, a, b) => Math.min(b, Math.max(a, v)) };
+    G.EnemyMgr = { all: () => [], get: () => null }; G.Judgment = { netState: () => null, netApply() {} };
+    G.Rift = { netState: () => [0, 0], netApply() {} }; G.Ranking = { mySeal: () => null };
+    G.Social = { me: { name: node.N.uid } }; G.Spawner = { say: t => said.push(t) };
+    new Function('G', 'document', 'performance', source('js/net/coop.js'))(G, { addEventListener() {} }, performance);
+    const local = { x: 0, y: 0, moveAngle: 0, walking: false, hp: 300, maxHp: 300, magnet: 78, aim: 0, xpMul: 1, activeGroup: () => [] };
+    G.Coop.begin({ host: 'host', members: [{ uid: 'host', name: 'Ana', dex: 25 }, { uid: 'g', name: 'Bea', dex: 25 }] }, local,
+      { team: () => ({ time: 0, level: 1, xp: 0, xpNext: 10, kills: 0, bosses: 0, coins: 0, t1: 0, t10: 0 }),
+        choosing: () => false, levelStart() {}, waiting() {}, syncTeam() {} });
+    return { G, said };
+  };
+  const h = mk(host), g = mk(guest);
+  const tick = async (n = 1) => {
+    for (let i = 0; i < n; i++) { now += 1000 / 15; h.G.Coop.tick(); g.G.Coop.tick(); await settle(); }
+  };
+  const framesTo = node => node.got.filter(([, m]) => m.k === 'f');
+  return { w, host, guest, h, g, tick, framesTo };
+}
+
+test('relay + coop: a guest on the server path keeps getting frames, and the events of both sides get through', async () => {
+  const { host, guest, h, g, tick, framesTo } = await coopRelay({ mode: 'server' });
+  assert.equal(host.N.mode('g'), 'relay'); assert.equal(guest.N.mode('host'), 'relay');
+  assert.equal(host.N.ready('g'), true, 'the server path counts as ready');
+  assert.equal(guest.N.ready('host'), true);
+  for (let i = 0; i < 700; i++) h.G.Coop.say('e' + i, 1);
+  for (let i = 0; i < 700; i++) g.G.Coop.status({ id: i }, 'b', 1);
+  await tick(30);
+  assert.ok(framesTo(guest).length >= 25, 'about 15 host frames per second reach the guest: ' + framesTo(guest).length);
+  assert.ok(framesTo(host).length >= 25, 'and the guest keeps sending its own');
+  assert.deepEqual(g.said, Array.from({ length: 700 }, (_, i) => 'e' + i), 'every host event, once, in order');
+  const sts = framesTo(host).flatMap(([, m]) => m.ev).filter(e => e[0] === 's').map(e => e[1]);
+  assert.deepEqual(sts, Array.from({ length: 700 }, (_, i) => i), 'every guest event, once, in order');
+  assert.ok(framesTo(host).every(([, m]) => m.ev.length <= 500), 'the guest splits a big backlog too');
+  assert.equal(host.N.busy('g'), false, 'the guest acks, so nothing stays pending');
+  assert.ok(host.N.load('g') <= 64 * 1024);
+});
+
+test('relay + coop: while the guest is away (or our socket is down) events wait, and all of them go out after', async () => {
+  const { w, host, h, g, tick } = await coopRelay({ mode: 'server' });
+  await tick(3);
+  const toG = () => w.log.filter(e => e[0] === 'host' && e[1] === 'm' && e[2] === 'g').length;
+  host.relay.fire('peer', 'g', 'away');
+  assert.equal(host.N.ready('g'), false, 'the server drops what goes to someone away');
+  const before = toG();
+  for (let i = 0; i < 20; i++) h.G.Coop.say('a' + i, 1);
+  await tick(20);
+  assert.equal(toG(), before, 'nothing is sent into the void');
+  host.relay.fire('peer', 'g', 'online');
+  assert.equal(host.N.ready('g'), true);
+  await tick(3);
+  host.relay.state = 'offline'; host.relay.fire('state', 'offline');
+  assert.equal(host.N.ready('g'), false, 'our own socket is down');
+  for (let i = 0; i < 20; i++) h.G.Coop.say('b' + i, 1);
+  await tick(10);
+  host.relay.state = 'online'; host.relay.fire('state', 'online');
+  await tick(3);
+  const want = [...Array.from({ length: 20 }, (_, i) => 'a' + i), ...Array.from({ length: 20 }, (_, i) => 'b' + i)];
+  assert.deepEqual(g.said, want, 'none lost, none repeated');
+});
+
+test('relay: load is what the guest has not acked yet on the server path, and busy follows it', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  assert.equal(host.N.load('g'), 0);
+  for (let i = 0; i < 5; i++) host.N.send('g', numbered(i));
+  await settle();                                       // llega la primera confirmación
+  assert.equal(host.N.load('g'), 0, 'all acked');
+  w.holdAcks = true;
+  let total = 0;
+  for (let i = 0; total < 3 * 64 * 1024; i++) {          // (lo guardado tiene tope: 4 x 64 KB)
+    host.N.send('g', frame(600, 400, i));
+    const b = w.log.at(-1)[4];
+    total += typeof b === 'string' ? Buffer.byteLength(b) : b.byteLength;
+    assert.equal(host.N.load('g'), total, 'counts what is not acked');
+    assert.equal(host.N.busy('g'), total > 64 * 1024);
+  }
+  await settle(); await w.clk.advance(1000);
+  w.releaseAcks();
+  assert.equal(host.N.load('g'), 0);
+  assert.equal(host.N.busy('g'), false);
+  assert.equal(guest.N.load('host'), 0, 'the guest never counts acks');
+  const other = await relayPair({ direct: false });
+  await other.w.clk.advance(6000);
+  other.w.dropAcks = true;
+  for (let i = 0; i < 30; i++) other.host.N.send('g', frame(600, 400, i));
+  assert.equal(other.host.N.load('g'), 0, 'with no acks ever, nothing counts (busy never sticks)');
+});
