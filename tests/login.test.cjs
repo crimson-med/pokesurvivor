@@ -1,5 +1,6 @@
 // js/ui/login.js con un DOM y un G.DB falsos: correo, código de 6 cifras,
-// errores, reenviar a los 30 s, invitado y "añadir un correo".
+// errores, reenviar a los 30 s, invitado, "añadir un correo" y la oferta de
+// añadir las partidas de antes.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -35,8 +36,8 @@ function load(db) {
   let clock = 0;
   const ctx = {
     G: {
-      UI: { $, chrome() {}, show() {}, toast: t => toasts.push(t) },
-      DB: db, I18n: { lang: 'es' },
+      UI: { $, chrome() {}, show() {}, toast: t => toasts.push(t), refreshCoins() {} },
+      DB: db, I18n: { lang: 'es', has: () => false }, T: s => s,
       Flow: { afterLogin: () => flow.after++, goMenu: () => flow.menu++ }
     },
     document: { querySelectorAll: s => (s === '#otp input' ? otp : s === '#login-local .tab' ? tabs : []) },
@@ -184,4 +185,29 @@ test('invitado; "añadir un correo" sin invitado y con Volver; modo local con no
   assert.equal($('login-local').hidden, false);
   assert.equal($('login-email').hidden, true);
   assert.equal($('btn-guest').hidden, false);
+});
+
+test('partidas de antes: la oferta sale una vez antes que los avisos; sí las añade, no se acuerda', async () => {
+  for (const yes of [true, false]) {
+    const db = fakeDB();
+    let asked = true;
+    Object.defineProperty(db, 'importable', { get: () => asked });
+    db.importOld = async () => { db.calls.push(['import']); asked = false; return { ok: true, n: 1 }; };
+    db.declineImport = () => { db.calls.push(['no']); asked = false; };
+    const { L, $, toasts } = load(db);
+    assert.equal(L.updateNotices(), true);
+    assert.equal($('scr-savenote').hidden, false);
+    assert.equal($('savenote-title').textContent, 'Progreso de antes en este navegador');
+    assert.equal($('savenote-ok').textContent, 'Añadir a esta cuenta');
+    assert.equal($('savenote-no').hidden, false);
+    if (yes) await $('savenote-ok').onclick(); else $('savenote-no').onclick();
+    assert.deepEqual(db.calls, [[yes ? 'import' : 'no']]);
+    assert.deepEqual(toasts, yes ? ['Progreso de antes añadido a esta cuenta.'] : []);
+    // Detrás, los avisos de siempre (con su único botón); la oferta ya no vuelve.
+    assert.equal($('savenote-no').hidden, true);
+    assert.equal($('savenote-title').textContent, 'Importante: guarda tu partida');
+    assert.equal(L.updateNotices(), true);
+    assert.notEqual($('savenote-title').textContent, 'Progreso de antes en este navegador');
+    assert.equal(db.calls.length, 1);
+  }
 });

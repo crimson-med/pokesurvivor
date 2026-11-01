@@ -13,9 +13,17 @@
  *     poder jugar sin conexión con la copia de la última vez.
  *       ps.me            la cuenta de la última vez ({ uid, kind, name, email, admin })
  *       ps.cloud.<uid>   la partida de esa cuenta en este navegador
- *     paso 3: la partida también en el servidor (ver MODO NUBE).
+ *       ps.rev.<uid>     la versión de la partida del servidor que tiene esa copia
+ *       ps.uids          las cuentas del servidor que han entrado aquí
+ *     La partida está en el servidor (GET y PUT /api/save, con rev: ver MODO
+ *     NUBE) y la copia de este navegador deja jugar sin conexión; lo de sin
+ *     conexión se sube cuando el servidor vuelve a contestar.
  *     Al juntar dos copias se FUSIONAN (G.SaveMerge.merge, js/core/save-merge.js):
  *     las colecciones se unen y nunca se pierde un Pokémon ni un shiny.
+ *     Partidas de antes en este navegador (ps.save.* del modo local, o
+ *     ps.cloud.* del juego original con Firebase): se ofrece una vez añadirlas
+ *     a la cuenta (importable, importOld; ps.import.no si dice que no,
+ *     ps.import.done si ya se añadieron).
  *
  *   LOCAL (localStorage)
  *     Si se abre con doble clic (file://) o la web no tiene el servidor del
@@ -27,7 +35,8 @@
  */
 G.DB = (() => {
   const K_ACC = 'ps.accounts', K_SES = 'ps.session', K_SAVE = 'ps.save.';
-  const K_CLOUD = 'ps.cloud.', K_ME = 'ps.me';
+  const K_CLOUD = 'ps.cloud.', K_ME = 'ps.me', K_REV = 'ps.rev.', K_UIDS = 'ps.uids';
+  const K_IMPORT_NO = 'ps.import.no', K_IMPORT_DONE = 'ps.import.done';
   // Cerró sesión sin conexión: la cookie sigue valiendo, así que al volver se cierra de verdad.
   const K_OUT = 'ps.out';
   const VERSION = 3;
@@ -357,19 +366,41 @@ G.DB = (() => {
    * es una cookie httpOnly que el navegador manda solo (G.Api). Aquí sólo se
    * sabe quién eres (me, de GET /api/me) y se guarda la partida.
    *
-   * paso 3: la partida en el servidor (GET y PUT /api/save con rev, ver
-   * docs/relay-coop/07-step-3-saves.md). Hasta entonces sólo está la copia de
-   * este navegador (ps.cloud.<uid>): se guarda al momento, Guardar no sube
-   * nada y al cerrar sesión se queda aquí para cuando vuelvas a entrar. La
-   * subida de antes (Firestore: rev + 1, juntar al rechazarla, Guardar con
-   * espera, reintentos) está en js/core/db.js del commit 8179399a.
+   * La partida en el servidor (docs/relay-coop/07-step-3-saves.md):
+   *   - Al entrar se lee (GET /api/save) y se junta con la copia de este
+   *     navegador (ps.cloud.<uid>). Si no se puede leer, se juega con la copia.
+   *   - Cada guardado (commit) va al momento a la copia de este navegador y la
+   *     subida se agrupa: sale como mucho PUSH_DELAY después del primer cambio
+   *     (los de mientras van en la misma). También sube ya con el botón
+   *     Guardar (saveNow), antes de recargar por una actualización (flush,
+   *     updater.js), al cerrar sesión y al salir del juego (visibilitychange).
+   *   - Versión (rev): cada subida nombra la versión que tiene esta copia y el
+   *     servidor sólo la deja pasar si sigue en esa (así un aparato con una
+   *     copia vieja no pisa lo guardado en otro). Si no, contesta 409 con la
+   *     suya: se juntan, se sube otra vez (una sola) y, si ya tenía todo, no
+   *     se escribe nada.
+   *   - Sin conexión (o el servidor caído): queda pendiente en la copia de
+   *     este navegador y se reintenta con espera creciente; en cuanto el
+   *     servidor vuelve a contestar (o el navegador vuelve a tener red), sube.
    */
   let uid = null;
   let me = null;              // { uid, kind: 'guest' | 'email', name, email (enmascarado), admin }
   let serverOk = false;       // el servidor contestó (no se juega sin conexión)
-  let pending = false;
+  let pending = false;        // hay cambios en este navegador sin subir
+  let pushing = null;         // la subida en marcha (promesa)
+  let pushT = 0, pushDue = 0, retryT = 0, fails = 0;
+  let lastErr = null;         // el fallo de la última subida (null si salió bien)
+  let rev = 0;                // la versión del servidor de la que sale esta copia
+  let openSeq = 0;            // cada openAccount y cada cierre de sesión (una lectura que llega tarde no cuenta)
+  // Lo último que se subió (o se leyó igual) desde aquí: si no ha cambiado nada, no se escribe.
+  // (Sin la hora del último cambio: cada guardado en el navegador la pone aunque no cambie nada más.)
+  let sentCanon = '';
   let syncState = 'local';    // 'ok' | 'syncing' | 'pending' | 'offline' | 'local'
   const listeners = new Set();
+  const PUSH_DELAY = 10e3, PUSH_TIMEOUT = 12e3;
+  const sameKey = s => canon(Object.assign({}, s, { updated: 0 }));
+  const setRev = r => { rev = Number.isSafeInteger(r) && r > 0 ? r : 0; if (uid) write(K_REV + uid, rev); };
+  const refresh = () => { if (G.UI && G.UI.refreshCoins) G.UI.refreshCoins(); };
 
   function setSync(s) { syncState = s; listeners.forEach(fn => { try { fn(s); } catch (e) { /* nada */ } }); }
 
@@ -390,8 +421,8 @@ G.DB = (() => {
     // (Más nueva que la de la otra, para que al juntarla se quede con esta.)
     if (now !== canon(other)) { save.updated = Math.max(Date.now(), (other.updated || 0) + 1); write(K_CLOUD + uid, save); }
     if (now === before) return;
-    // paso 3: aquí quedaba pendiente de subir (pending = true; setSync('pending')).
-    if (G.UI && G.UI.refreshCoins) G.UI.refreshCoins();
+    markPending();
+    refresh();
   }
 
   const plain = s => JSON.parse(JSON.stringify(s));
@@ -400,28 +431,237 @@ G.DB = (() => {
 
   /**
    * Abre la partida de la cuenta `m` (recién comprobada o la de la última vez,
-   * sin conexión). opts.from: la partida de un invitado (opts.fromUid) que
-   * entra en una cuenta que ya existía: se junta con la de la cuenta
-   * (G.SaveMerge.mergeInto, igual que el servidor).
+   * sin conexión: opts.offline, entonces no se pide la del servidor).
+   * opts.from: la partida de un invitado (opts.fromUid) que entra en una
+   * cuenta que ya existía: se junta con la de la cuenta (G.SaveMerge.mergeInto,
+   * igual que el servidor).
    */
-  function openAccount(m, opts = {}) {
+  async function openAccount(m, opts = {}) {
+    stopPush();
+    // (Mientras se lee la del servidor no hay partida: así otra pestaña no junta nada en la de antes.)
+    save = null; user = null;
     me = m; uid = m.uid; key = uid; guest = false;
+    sentCanon = ''; pending = false; fails = 0; lastErr = null;
     write(K_ME, me);
     remove(K_OUT);
-    const cached = read(K_CLOUD + uid);
-    let s = cached ? fold(migrate(cached)) : null;
-    if (opts.from) {
-      s = G.SaveMerge.mergeInto(s, migrate(opts.from), 'g' + opts.fromUid);
-      if (!cached) s.name = m.name || s.name;   // (el nombre es el de la cuenta, no el del invitado)
+    const uids = read(K_UIDS);
+    const known = Array.isArray(uids) ? uids.filter(x => typeof x === 'string') : [];
+    if (!known.includes(uid)) write(K_UIDS, known.concat(uid).slice(-50));
+    // La del servidor: se junta con la de aquí. Sin poder leerla (o si no se
+    // entiende), la versión es la de la última vez: así una subida no la pisa
+    // sin juntarla antes (el servidor contesta 409 con ella).
+    const seq = ++openSeq;
+    let remote = null, got = false, srvRev = 0;
+    if (!opts.offline) {
+      try {
+        const r = await timed(opts.saveP || G.Api.get('/api/save'));
+        if (r && isObj(r.save)) remote = migrate(plain(r.save));
+        srvRev = remote ? r.rev : 0;
+        got = true;
+      } catch (e) {
+        remote = null;
+        if (e.status === 404) got = true;
+      }
     }
-    // paso 3: aquí se lee la del servidor (GET /api/save) y se junta: s = merge(s, remota).
+    if (seq !== openSeq || uid !== m.uid) return;   // (otra cuenta, o se cerró sesión, mientras tanto)
+    setRev(got ? srvRev : +read(K_REV + uid) || 0);
+    // (La copia de aquí, después de leer la del servidor: lo que otra pestaña guardó mientras, también.)
+    const cached = read(K_CLOUD + uid);
+    let s = merge(cached ? fold(migrate(cached)) : null, remote);
+    // La del invitado, al final: el nombre, el compañero... son los de la cuenta.
+    if (opts.from) {
+      const had = !!s;
+      s = G.SaveMerge.mergeInto(s, migrate(opts.from), 'g' + opts.fromUid);
+      if (!had) s.name = m.name || s.name;   // (el nombre es el de la cuenta, no el del invitado)
+    }
     if (!s) s = newSave(m.name || 'Entrenador');
     save = fold(migrate(s, s.name));
     user = save.name;
     write(K_CLOUD + uid, save);
-    pending = false;
-    setSync('local');
+    // Si esta copia tiene algo que el servidor no (cuenta nueva, progreso sin
+    // subir, sin conexión), queda pendiente y sube sola. Se mira lo que hay, no la fecha.
+    const same = remote && sameKey(plain(save)) === sameKey(fold(plain(remote)));
+    if (!got) { pending = true; setSync('offline'); scheduleRetry(); }
+    else if (same) { sentCanon = sameKey(plain(save)); setSync('ok'); }
+    else markPending();
   }
+
+  /** Hay cambios sin subir: la subida sale como mucho PUSH_DELAY después. */
+  function markPending() {
+    if (mode !== 'cloud' || guest || !save || !uid) return;
+    pending = true;
+    // Sin conexión ya hay un reintento con espera; mientras sube, al acabar se mira si queda algo.
+    if (syncState === 'offline' || syncState === 'syncing' || stuck()) return;
+    setSync('pending');
+    schedulePush(PUSH_DELAY);
+  }
+
+  function stopPush() {
+    clearTimeout(pushT); clearTimeout(retryT);
+    pushT = retryT = pushDue = 0;
+  }
+
+  // Si ya había una subida programada para antes, se respeta (no se retrasa).
+  function schedulePush(ms) {
+    const due = Date.now() + ms;
+    if (pushT && pushDue <= due) return;
+    clearTimeout(pushT); pushDue = due;
+    const id = pushT = setTimeout(() => { if (pushT !== id) return; pushT = pushDue = 0; pushNow(); }, ms);
+  }
+
+  // Reintento con espera creciente: 5 s, 10 s, 20 s... hasta 5 min.
+  function scheduleRetry() {
+    const ms = Math.min(5 * 60e3, 5e3 * Math.pow(2, fails)) * (0.8 + Math.random() * 0.4);
+    fails = Math.min(fails + 1, 8);
+    clearTimeout(retryT);
+    const id = retryT = setTimeout(() => { if (retryT !== id) return; retryT = 0; if (pending) pushNow(); }, ms);
+  }
+
+  // Una petición que no contesta (la red cae a medias) cuenta como sin conexión.
+  function timed(p) {
+    let t = 0;
+    return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(Object.assign(new Error('timeout'), { code: 'timeout', status: 0 })), PUSH_TIMEOUT); })])
+      .finally(() => clearTimeout(t));
+  }
+
+  /*
+   * El servidor tenía otra versión (409, con la suya en data): se junta con la
+   * de aquí y se queda su rev. → true si aún hay que subir (la de aquí tenía
+   * algo que el servidor no).
+   */
+  function absorb(data) {
+    let remote = data && isObj(data.save) ? data.save : null;
+    // (Si no se entiende, no se queda su rev: así no se pisa sin juntarla.)
+    if (remote) remote = migrate(plain(remote));
+    setRev(data ? +data.rev || 0 : 0);
+    if (!remote) return true;
+    applyInPlace(fold(merge(plain(fold(save)), remote)));
+    write(K_CLOUD + uid, save);
+    refresh();
+    return sameKey(plain(save)) !== sameKey(fold(plain(remote)));
+  }
+
+  // Merece la pena reintentar: sin conexión, el servidor con problemas, un tope o una carrera (409).
+  // (Lo demás, como 401 sin sesión o 413 demasiado grande, no se arregla solo: hasta Guardar o recargar.)
+  const retriable = e => unreachable(e) || e.code === 'timeout' || !e.status || e.status >= 500 || e.status === 429 || e.status === 409;
+  const stuck = () => !!lastErr && !retriable(lastErr);
+
+  /**
+   * Sube la partida (PUT /api/save con la rev de esta copia). Con 409, se
+   * junta con la del servidor y se sube otra vez (una sola). Nunca falla: lo
+   * que no sube queda pendiente y se reintenta.
+   */
+  function pushNow() {
+    if (mode !== 'cloud' || guest || !save || !uid) return Promise.resolve();
+    // Si ya hay una subida en marcha, se hace otra justo después (para lo que haya cambiado mientras).
+    if (pushing) { pending = true; return pushing.then(() => (pending && !lastErr ? pushNow() : undefined)); }
+    clearTimeout(pushT); pushT = pushDue = 0;
+    // Igual que lo último que se subió: el servidor ya lo tiene.
+    if (sentCanon && sameKey(plain(fold(save))) === sentCanon) { pending = false; lastErr = null; setSync('ok'); return Promise.resolve(); }
+    pending = false;
+    setSync('syncing');
+    const u = uid;
+    let tried = '';
+    const send = () => {
+      const body = plain(fold(save));
+      tried = sameKey(body);
+      return timed(G.Api.put('/api/save', { save: body, rev }));
+    };
+    pushing = send().catch(e => {
+      // Otro aparato (u otra pestaña) subió antes: se junta con lo suyo y otra vez.
+      if (e.status !== 409 || uid !== u || !save) throw e;
+      if (!absorb(e.data)) { tried = sameKey(plain(save)); return { rev }; }
+      return send().catch(e2 => {
+        if (e2.status === 409 && uid === u && save) absorb(e2.data);
+        throw e2;
+      });
+    }).then(r => {
+      if (uid !== u) return;
+      fails = 0; lastErr = null;
+      clearTimeout(retryT); retryT = 0;
+      setRev(r && r.rev);
+      sentCanon = tried;
+      if (!serverOk) retryMe();             // (estaba sin conexión al abrir: ya contesta)
+      // Lo cambiado mientras se subía sale en la siguiente.
+      if (pending) { setSync('pending'); schedulePush(PUSH_DELAY); } else setSync('ok');
+      refresh();
+    }).catch(e => {
+      if (uid !== u) return;
+      console.warn('[DB] no se pudo subir la partida:', e.code, e.status);
+      lastErr = e;
+      pending = true;
+      setSync(unreachable(e) || e.code === 'timeout' ? 'offline' : 'pending');
+      if (retriable(e)) scheduleRetry();
+    }).finally(() => { pushing = null; });
+    return pushing;
+  }
+
+  /*
+   * Sales del juego (lo minimizas, cambias de app o de pestaña) con cambios
+   * sin subir: se suben ya. Y si el navegador vuelve a tener red, también.
+   */
+  if (typeof document !== 'undefined' && document.addEventListener) document.addEventListener('visibilitychange', () => {
+    if (document.hidden && pending && mode === 'cloud' && !guest && save) pushNow();
+  });
+  if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('online', () => {
+    if (mode !== 'cloud' || !me) return;
+    if (!serverOk) retryMe();
+    if (pending && save) { fails = 0; pushNow(); }
+  });
+
+  /*
+   * Partidas de antes en este navegador: las del modo local (ps.save.<nombre>)
+   * y las del juego original con Firebase (ps.cloud.<uid de Firebase>). Las
+   * ps.cloud.* de las cuentas de este servidor no cuentan: están en ps.uids o
+   * tienen la forma de sus uid (22 letras, base64url).
+   */
+  const SERVER_UID = /^[A-Za-z0-9_-]{22}$/;
+  function oldSaves() {
+    const out = [];
+    let known = read(K_UIDS);
+    known = Array.isArray(known) ? known : [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        let tag = null;
+        if (!k) continue;
+        if (k.startsWith(K_SAVE)) tag = 's.' + k.slice(K_SAVE.length);
+        else if (k.startsWith(K_CLOUD)) {
+          const id = k.slice(K_CLOUD.length);
+          if (!SERVER_UID.test(id) && !known.includes(id)) tag = 'c.' + id;
+        }
+        if (!tag) continue;
+        const s = read(k);
+        // (Sólo si tiene algo: una cuenta creada y sin jugar no.)
+        if (isObj(s) && isObj(s.owned) && Object.keys(s.owned).length) out.push({ k, tag: 'i' + tag.slice(0, 40), s });
+      }
+    } catch (e) { /* sin almacenamiento: no hay nada */ }
+    return out;
+  }
+  const importable = () => mode === 'cloud' && !guest && !!save && !!uid && serverOk &&
+    !read(K_IMPORT_NO) && !read(K_IMPORT_DONE) && oldSaves().length > 0;
+
+  /**
+   * Sí: las partidas de antes se juntan con la de la cuenta (mergeInto, cada
+   * una con su etiqueta de aparato: las monedas se suman) y se sube. Se quedan
+   * en el navegador, pero ya no se vuelve a preguntar. → promesa { ok, n }
+   */
+  async function importOld() {
+    if (!importable()) return { ok: false, n: 0 };
+    const list = oldSaves();
+    let s = plain(fold(save));
+    for (const o of list) {
+      try { s = G.SaveMerge.mergeInto(s, migrate(plain(o.s)), o.tag); } catch (e) { /* esa no se puede leer */ }
+    }
+    applyInPlace(fold(migrate(s, save.name)));
+    write(K_IMPORT_DONE, uid);
+    commit();
+    refresh();
+    await pushNow();
+    return { ok: true, n: list.length };
+  }
+  /** No: se quedan en el navegador y no se vuelve a preguntar. */
+  function declineImport() { write(K_IMPORT_NO, 1); }
 
   // Sin conexión al abrir: se vuelve a preguntar quién eres, con espera creciente.
   let meT = 0, meTries = 0;
@@ -437,6 +677,8 @@ G.DB = (() => {
       const r = await G.Api.get('/api/me');
       if (uid !== u || !r || !r.me || r.me.uid !== u) return;
       me = r.me; serverOk = true; write(K_ME, me);
+      // Lo que se jugó sin conexión sube ya.
+      if (pending && save) { fails = 0; pushNow(); }
     } catch (e) {
       // Sesión cerrada desde otro sitio: se sigue con la copia; al recargar, a entrar.
       if (e.status !== 401 && e.status !== 403) meLater();
@@ -474,10 +716,13 @@ G.DB = (() => {
         mode = 'cloud'; serverOk = !read(K_OUT); remove(K_ME);
         return false;
       }
+      // Si ya entró alguien aquí, su partida se pide a la vez que quién es (una espera menos al abrir).
+      const saveP = read(K_ME) ? G.Api.get('/api/save') : null;
+      if (saveP) saveP.catch(() => { /* se mira en openAccount */ });
       try {
         const r = await G.Api.get('/api/me');
         mode = 'cloud'; serverOk = true;
-        openAccount(r.me);
+        await openAccount(r.me, { saveP });
         return true;
       } catch (e) {
         if (e.status === 401) { mode = 'cloud'; serverOk = true; remove(K_ME); return false; }
@@ -488,8 +733,7 @@ G.DB = (() => {
           // Sin conexión (o el servidor contesta con un error, como rate), con
           // alguien que ya entró aquí: se juega con su copia y se vuelve a preguntar.
           mode = 'cloud'; serverOk = false;
-          openAccount(last);
-          setSync('offline');
+          await openAccount(last, { offline: true });
           meTries = 0; meLater();
           return true;
         }
@@ -540,10 +784,11 @@ G.DB = (() => {
     if (prev && prev.kind === 'guest' && prev.uid !== r.me.uid) {
       from = read(K_CLOUD + prev.uid);
       remove(K_CLOUD + prev.uid);         // ese invitado ya no existe
+      remove(K_REV + prev.uid);
     }
     if (prev && prev.uid !== r.me.uid) for (const fn of leaveHooks) { try { await fn('logout'); } catch (e) { /* nada */ } }
-    openAccount(r.me, { from, fromUid: prev && prev.uid });
-    return { ok: true, isNew: !save.partner, merged: !!r.merged };
+    await openAccount(r.me, { from, fromUid: prev && prev.uid });
+    return { ok: true, isNew: !(save && save.partner), merged: !!r.merged };
   }
 
   /** Cambia el nombre que se ve en la partida (al elegir apodo). */
@@ -561,10 +806,10 @@ G.DB = (() => {
    */
   function playAsGuest() {
     if (mode === 'cloud') {
-      return settleOut().then(() => G.Api.post('/api/auth/guest', {})).then(r => {
+      return settleOut().then(() => G.Api.post('/api/auth/guest', {})).then(async r => {
         serverOk = true;
-        openAccount(r.me);
-        return { ok: true, isNew: !save.partner };
+        await openAccount(r.me);
+        return { ok: true, isNew: !(save && save.partner) };
       }, e => ({ ok: false, code: codeOf(e) }));
     }
     user = 'Invitado'; key = null; guest = true; uid = null; me = null;
@@ -575,29 +820,35 @@ G.DB = (() => {
 
   /**
    * Guarda la partida actual (no hace nada en modo invitado). En el navegador,
-   * al momento. (Algunos lo llaman con 'run' o true, de cuando se subía antes
-   * lo urgente: ya no cambia nada.)
+   * al momento; en el servidor, en la próxima subida (ver MODO NUBE).
+   * (Algunos lo llaman con 'run' o true, de cuando se subía antes lo urgente:
+   * ya no cambia nada.)
    */
   function commit() {
     if (guest || !key || !save) return false;
     save.updated = Date.now();
     fold(save);
     if (mode === 'local') return write(K_SAVE + key, save);
-    // paso 3: además queda pendiente de subir (pending = true; setSync('pending')).
-    return write(K_CLOUD + uid, save);
+    const ok = write(K_CLOUD + uid, save);
+    markPending();
+    return ok;
   }
 
-  /** Subir lo pendiente (updater.js, antes de recargar). paso 3: PUT /api/save. */
-  function flush() { return Promise.resolve(); }
+  /** Sube ya lo pendiente (updater.js, antes de recargar). → promesa que no falla. */
+  function flush() { return pending || pushing ? pushNow() : Promise.resolve(); }
 
   /**
-   * Botón Guardar. → { ok, why?: 'local'|'guest'|... }. paso 3: sube a la
-   * nube; hasta entonces la partida ya está guardada en este navegador.
+   * Botón Guardar: sube ya lo pendiente. Si no hay nada pendiente no escribe.
+   * → { ok, why?: 'local'|'guest'|'done'|'offline'|'fail' }
    */
   async function saveNow() {
     if (guest || !save) return { ok: false, why: 'guest' };
-    commit();
-    return { ok: true, why: 'local' };
+    if (mode !== 'cloud') { commit(); return { ok: true, why: 'local' }; }
+    if (!pending && !pushing && syncState === 'ok') return { ok: true, why: 'done' };
+    fails = 0;
+    await pushNow();
+    if (!lastErr) return { ok: true };
+    return { ok: false, why: syncState === 'offline' ? 'offline' : 'fail' };
   }
 
   /** Funciones que se ejecutan al cerrar sesión o borrar la cuenta (amigos, salas...). */
@@ -605,20 +856,23 @@ G.DB = (() => {
 
   function clearSession() {
     clearTimeout(meT);
+    stopPush();
+    openSeq++;
     remove(K_ME);
-    user = key = save = uid = me = null; guest = false; pending = false;
+    user = key = save = uid = me = null; guest = false; pending = false; sentCanon = ''; lastErr = null; rev = 0;
     setSync('local');
   }
 
   /**
-   * Cerrar sesión. Con el servidor, la copia de la partida se queda en este
-   * navegador (vuelve al entrar otra vez con la misma cuenta).
+   * Cerrar sesión. Con el servidor, antes se sube lo pendiente; la copia de la
+   * partida se queda en este navegador (si algo no subió, sube al entrar otra
+   * vez con la misma cuenta).
    * @param all  cerrarla también en todos los demás aparatos
    */
   async function logout(all) {
     for (const fn of leaveHooks) { try { await fn('logout'); } catch (e) { /* nada */ } }
     if (mode === 'cloud') {
-      if (save && !guest) commit();
+      if (save && !guest) { commit(); await pushNow(); }
       if (all) {
         try { await G.Api.post('/api/auth/logout-all', {}); }
         catch (e) { if (e.status !== 401) return { ok: false, code: codeOf(e) }; }
@@ -650,7 +904,8 @@ G.DB = (() => {
       if (e.status !== 401) return { ok: false, error: e.code === 'offline' ? 'Sin conexión a internet.' : 'No se pudo borrar la cuenta. Vuelve a probar en un momento.' };
     }
     for (const fn of leaveHooks) { try { await fn('delete'); } catch (e) { /* nada */ } }
-    remove(K_CLOUD + uid);
+    stopPush(); pending = false;
+    remove(K_CLOUD + uid); remove(K_REV + uid);
     clearSession();
     return { ok: true };
   }
@@ -707,6 +962,9 @@ G.DB = (() => {
     ready, sendCode, verifyCode, playAsGuest, logout, commit, deleteAccount, flush, saveNow,
     register, login,
     owns, grant, ownsShiny, grantShiny, merge, setName, upgradesOf, isFav, setFav,
+    importOld, declineImport,
+    /** ¿Hay partidas de antes en este navegador que ofrecer a esta cuenta? (una vez) */
+    get importable() { return importable(); },
     onSync(fn) { listeners.add(fn); },
     onLeave(fn) { leaveHooks.push(fn); },
     /** Firebase ya no se usa (paso 2): los módulos de red que aún lo leen se quedan sin nube. */

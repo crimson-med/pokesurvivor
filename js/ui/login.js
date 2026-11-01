@@ -185,8 +185,7 @@ G.LoginUI = (() => {
    * primera vez que se entra al menú después de subirla; si hay varios,
    * uno tras otro. Para uno nuevo, se añade aquí con su propia clave.
    */
-  // (Con la partida sólo en este navegador, syncState 'local', no: hablan de la nube. paso 3.)
-  const cloud = () => G.DB.mode === 'cloud' && !G.DB.guest && G.DB.syncState !== 'local';
+  const cloud = () => G.DB.mode === 'cloud' && !G.DB.guest;
   const NOTES = [
     { key: 'ps.savenote.1', when: cloud,              // botón Guardar (18-10-2026)
       title: ['Importante: guarda tu partida', 'Important: save your game'],
@@ -201,8 +200,50 @@ G.LoginUI = (() => {
              '<p>We have adjusted the <b>Judgment of Arceus</b>: running away with maxed-out speed and poison no longer let you last forever.</p>' +
              '<p>So everyone competes on equal terms, <b>all leaderboards start from scratch</b> (daily, weekly, monthly, yearly and all-time). Go for first place!</p>'] }
   ];
+  /*
+   * Partidas de antes en este navegador (G.DB.importable: las del modo local o
+   * las del juego original): una vez, "¿Añadirlas a esta cuenta?". Sale antes
+   * que los avisos, en la misma caja, con un segundo botón para el no; al
+   * contestar siguen los avisos.
+   */
+  function importOffer() {
+    let on = false;
+    try { on = !!G.DB.importable; } catch (e) { on = false; }
+    if (!on) return false;
+    const ok = $('savenote-ok');
+    let no = $('savenote-no');
+    if (!no) {
+      no = document.createElement('button');
+      no.id = 'savenote-no'; no.type = 'button'; no.className = 'btn ghost';
+      no.style.cssText = 'width:100%;margin-top:8px';
+      ok.after(no);
+    }
+    $('savenote-title').textContent = G.T('Progreso de antes en este navegador');
+    $('savenote-body').innerHTML = '<p>' + G.T('Hemos encontrado progreso de antes en este navegador. ¿Lo añadimos a esta cuenta? Se junta con lo que ya tienes y no se pierde nada.') + '</p>';
+    ok.textContent = G.T('Añadir a esta cuenta');
+    no.textContent = G.T('No, gracias');
+    no.classList.remove('hidden');
+    const done = () => {
+      no.classList.add('hidden');
+      $('scr-savenote').classList.add('hidden');
+      updateNotices();
+    };
+    ok.onclick = async () => {
+      ok.disabled = no.disabled = true;
+      const r = await G.DB.importOld();
+      ok.disabled = no.disabled = false;
+      if (r && r.ok) G.UI.toast('Progreso de antes añadido a esta cuenta.', 3000);
+      G.UI.refreshCoins();
+      done();
+    };
+    no.onclick = () => { G.DB.declineImport(); done(); };
+    $('scr-savenote').classList.remove('hidden');
+    return true;
+  }
+
   /** → true si se ha enseñado alguno. */
   function updateNotices() {
+    if (importOffer()) return true;
     const queue = NOTES.filter(n => { try { return n.when() && !localStorage.getItem(n.key); } catch (e) { return false; } });
     if (!queue.length) return false;
     const en = G.I18n.lang === 'en' ? 1 : 0;
