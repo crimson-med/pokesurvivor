@@ -18,7 +18,8 @@
  *   invitado -> anfitrión  { k:'f', p:[estado], ev:[eventos], h, w }   (h, w: ver flushClient)
  *   anfitrión -> invitado  { k:'f', t, lv, xp, xn, ki, bo, co, p:{uid:[estado]},
  *                            e:[[id,x,y,vida,anim,dir,estados]], ev:[eventos],
- *                            ja:[x,y,anim,dir,daño] (Arceus, sólo en la Sentencia) }
+ *                            ja:[x,y,anim,dir,daño] (Arceus, sólo en la Sentencia),
+ *                            ha: último golpe del invitado ya aplicado (ver hit) }
  *   anfitrión -> todos     { k:'start', seed, host, members:[{uid,name,dex,shiny}] }
  */
 G.Coop = (() => {
@@ -28,13 +29,25 @@ G.Coop = (() => {
   // Realtime Database (apagado: 1 $ el GB).
   const RATE_FAST = 1 / 15, RATE_SLOW = 1 / 3;
   const rateFor = u => (G.Net.slow(u) ? RATE_SLOW : RATE_FAST);
-  const NEAR = 950;                     // radio de enemigos que se mandan a cada uno
+  // Enemigos que se mandan a cada uno (2-11-2026): los de NEAR en cada envío y los
+  // de hasta FAR uno de cada FAR_EVERY, alrededor de adonde va (LEAD). Antes eran
+  // sólo los de 950 px alrededor de la última posición que había llegado: con mucha
+  // velocidad o con retraso, los del borde de la pantalla no llegaban y aparecían de
+  // golpe, ya tocados por los demás.
+  const NEAR = 800, FAR = 1300, FAR_EVERY = 3;
+  const LEAD = 0.3;                     // s que se adelanta la posición del invitado
+  // Con más que esto por salir (y menos que G.Net.busy), sólo van los de NEAR:
+  // envíos más pequeños para que la cola baje en vez de pararlo todo.
+  const LOAD_BYTES = 16 * 1024;
   const EV_MAX = 500;                   // eventos por envío como mucho (el resto, en el siguiente)
 
   let active = false, host = false, me = null, hostUid = null;
   let local = null;                     // tu Player
   const mates = new Map();              // uid -> { uid, name, color, pl, connected, q:[], flushT, xpMul }
   let outEv = [];                       // invitado: eventos para el anfitrión
+  // Invitado: número del último golpe mandado y los que el anfitrión aún no ha
+  // aplicado [número, enemigo, daño] (ver hit y onHostFrame).
+  let hitSeq = 0, pend = [];
   let flushT = 0;
   let hitFrom = null;                   // invitado cuyo golpe se está aplicando (no repetirle el número)
   let api = {};                         // callbacks del juego (game.js)
@@ -71,6 +84,7 @@ G.Coop = (() => {
     members = cfg.members;
     mates.clear();
     outEv = []; flushT = 0; waiting = new Set(); holds = new Set();
+    hitSeq = 0; pend = [];
     hostAway = false; stalled = false; lastHostAt = performance.now();
     sums = {}; sumT = 1; myHold = false;
     levelSeq = 0; levelNow = 1; seenSeq = 0; doneSeq = 0; lastHo = '';
@@ -83,7 +97,8 @@ G.Coop = (() => {
       p.x = x; p.y = y;
       p.net = { x, y, ang: Math.PI / 2, walk: 0, hp: p.maxHp, maxHp: p.maxHp, dead: 0, mv: G.baseStartOf(mon.dex), ml: 1, mag: 78, aim: Math.PI / 2, rev: 0 };
       G.Sprites.preload([mon.dex], 8000, p.shiny);
-      mates.set(m.uid, { uid: m.uid, name: m.name, color: COLORS[i], pl: p, connected: true, q: [], flushT: 0, xpMul: 1, lastAt: performance.now() });
+      mates.set(m.uid, { uid: m.uid, name: m.name, color: COLORS[i], pl: p, connected: true, q: [], flushT: 0, xpMul: 1, lastAt: performance.now(),
+                         hitAck: 0, vx: 0, vy: 0, posAt: 0, sent: 0 });
     });
   }
 
@@ -216,11 +231,19 @@ G.Coop = (() => {
     }
   }
 
-  function enemyList(near) {
+  /** Anfitrión: alrededor de dónde se le mandan enemigos a un invitado. */
+  function centerOf(m) {
+    const v = viewOf(m);
+    if (v !== m.pl || !m.pl.net) return v;
+    // Su última posición (la copia de aquí va suavizada, por detrás) y adonde va.
+    return { x: m.pl.net.x + m.vx * LEAD, y: m.pl.net.y + m.vy * LEAD };
+  }
+
+  function enemyList(c, far) {
     const out = [];
-    const r2n = NEAR * NEAR;
+    const r2 = (far ? FAR : NEAR) ** 2;
     for (const e of G.EnemyMgr.all()) {
-      if (e.dead || G.U.dist2(e.x, e.y, near.x, near.y) > r2n) continue;
+      if (e.dead || G.U.dist2(e.x, e.y, c.x, c.y) > r2) continue;
       const a = ANIMS.indexOf(e.anim.cur);
       out.push([e.id, r1(e.x), r1(e.y), Math.ceil(e.hp), a < 0 ? 0 : a, e.anim.dir,
                 (e.burn > 0 ? 1 : 0) | (e.poison > 0 ? 2 : 0) | (e.shield > 0 ? 4 : 0) | (e.slow > 0 ? 8 : 0) | (e.sleepT > 0 ? 16 : 0)]);
@@ -238,7 +261,8 @@ G.Coop = (() => {
     const ev = m.q.length > EV_MAX ? m.q.splice(0, EV_MAX) : m.q;
     if (ev === m.q) m.q = [];
     const f = { k: 'f', t: r2(st.time), lv: st.level, xp: r2(st.xp), xn: st.xpNext, ki: st.kills, bo: st.bosses, co: st.coins, tk: [st.t1, st.t10, st.cn || 0],
-                p, e: enemyList(viewOf(m)), ev };
+                p, e: enemyList(centerOf(m), m.sent++ % FAR_EVERY === 0 && G.Net.load(m.uid) < LOAD_BYTES), ev,
+                ha: m.hitAck };       // su último golpe ya aplicado (ver onHostFrame)
     const ja = G.Judgment.netState();       // Arceus en la Sentencia
     if (ja) f.ja = ja;
     // Siempre: quién está eligiendo y, si hay cartas de nivel, cuáles (ver arriba).
@@ -379,10 +403,20 @@ G.Coop = (() => {
     if (msg.h === 0 && holds.has(from)) holdOff(from);
     else if (msg.h === 1 && !holds.has(from)) holdOn(from);
     if (typeof msg.w === 'number' && msg.w >= levelSeq && waiting.has(from)) picked(from);
-    if (msg.p) { m.state = msg.p; m.pl.net = readState(msg.p); m.xpMul = m.pl.net.xpMul || 1; reconcile(from, m.pl.net); }
+    if (msg.p) {
+      const prev = m.pl.net, now = performance.now(), dt = (now - m.posAt) / 1000;
+      m.state = msg.p; m.pl.net = readState(msg.p); m.xpMul = m.pl.net.xpMul || 1; reconcile(from, m.pl.net);
+      // Su velocidad (para centerOf), suavizada: llegan unas 15 posiciones por segundo.
+      if (prev && m.posAt && dt > 0.02 && dt < 1) {
+        m.vx += (G.U.clamp((m.pl.net.x - prev.x) / dt, -900, 900) - m.vx) * 0.5;
+        m.vy += (G.U.clamp((m.pl.net.y - prev.y) / dt, -900, 900) - m.vy) * 0.5;
+      } else { m.vx = 0; m.vy = 0; }
+      m.posAt = now;
+    }
     for (const ev of msg.ev || []) {
       switch (ev[0]) {
         case 'h': {
+          if (typeof ev[7] === 'number' && ev[7] > m.hitAck) m.hitAck = ev[7];
           const e = G.EnemyMgr.get(ev[1]);
           if (!e || e.dead || e.remote) break;
           hitFrom = from;
@@ -475,6 +509,13 @@ G.Coop = (() => {
       const m = mates.get(u);
       if (m) m.pl.net = readState(msg.p[u]);
     }
+    // Golpes tuyos que el anfitrión aún no había aplicado al salir este envío: se
+    // restan a la vida que manda. Antes la barra bajaba, volvía a subir al llegar
+    // la vida de antes de tu golpe y bajaba otra vez (2-11-2026). Un anfitrión de
+    // antes no manda ha: se usa su vida tal cual.
+    if (typeof msg.ha === 'number') pend = pend.filter(p => p[0] > msg.ha); else pend = [];
+    const owed = new Map();
+    for (const p of pend) owed.set(p[1], (owed.get(p[1]) || 0) + p[2]);
     const now = performance.now();
     for (const a of msg.e || []) {
       const e = G.EnemyMgr.get(a[0]);
@@ -487,6 +528,7 @@ G.Coop = (() => {
       } else { n.vx = 0; n.vy = 0; }
       n.x = a[1]; n.y = a[2]; n.age = 0; n.last = now;
       e.hp = Math.min(e.maxHp, a[3]);
+      if (owed.has(a[0])) e.hp = Math.max(1, e.hp - owed.get(a[0]));
       n.anim = a[4]; n.dir = a[5]; n.st = a[6];
     }
   }
@@ -547,7 +589,16 @@ G.Coop = (() => {
   }
 
   // invitado
-  function hit(e, d, color, dx, dy, knock) { outEv.push(['h', e.id, d, color, r1(dx), r1(dy), knock || 0]); }
+  /** Invitado: golpe a una copia. Devuelve si se le puede quitar ya la vida aquí. */
+  function hit(e, d, color, dx, dy, knock) {
+    outEv.push(['h', e.id, d, color, r1(dx), r1(dy), knock || 0, ++hitSeq]);
+    // Arceus no pierde vida; con escudo, el anfitrión se lo quita primero y aquí
+    // no se sabe cuánto le queda: mejor esperar a su vida que bajarla y subirla.
+    if (e.arceus || (e.net && e.net.st & 4)) return false;
+    pend.push([hitSeq, e.id, d]);
+    if (pend.length > 2000) pend.shift();
+    return true;
+  }
   function status(e, kind, val) { outEv.push(['s', e.id, kind, val]); }
 
   // anfitrión

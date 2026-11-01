@@ -390,6 +390,8 @@ G.Net = (() => {
     slow(u) { const p = peers.get(u); return !p || p.mode !== 'direct'; },
     /** ¿Le queda mucho por salir? Entonces mejor esperar que mandar más (ver BUSY_BYTES). */
     busy(u) { const p = peers.get(u); return !!(p && p.dc && p.dc.readyState === 'open' && p.dc.bufferedAmount > BUSY_BYTES); },
+    /** Bytes que le quedan por salir (0 sin canal abierto). */
+    load(u) { const p = peers.get(u); return p && p.dc && p.dc.readyState === 'open' ? p.dc.bufferedAmount : 0; },
     peers() { return [...peers.keys()]; },
     get open_() { return !!roomId; },
     get isHost() { return isHost; },
