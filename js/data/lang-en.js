@@ -765,6 +765,10 @@ G.I18n.add({
   'Se cerrará la sesión en todos los aparatos donde hayas entrado, también en este. ¿Seguro?': 'You\'ll be logged out on every device where you signed in, this one too. Are you sure?',
   'No se pudo cerrar la sesión en todas partes. Vuelve a probar en un momento.': 'Couldn\'t log out everywhere. Try again in a moment.',
   'No se pudo borrar la cuenta. Vuelve a probar en un momento.': 'Couldn\'t delete the account. Try again in a moment.',
+  'Progreso de antes en este navegador': 'Progress from before on this browser',
+  'Hemos encontrado progreso de antes en este navegador. ¿Lo añadimos a esta cuenta? Se junta con lo que ya tienes y no se pierde nada.': 'We found progress from before on this browser. Add it to this account? It joins what you already have and nothing is lost.',
+  'Añadir a esta cuenta': 'Add to this account',
+  'Progreso de antes añadido a esta cuenta.': 'Progress from before added to this account.',
 
   // ---------------- reportar marcas del ranking ----------------
   'Reportar marca sospechosa': 'Report suspicious record', 'Ya la has reportado': 'You already reported it',
@@ -1172,4 +1176,6 @@ G.I18n.add({
   "El juego en grupo está lleno ahora mismo. Prueba otra vez en unos minutos.": "Group play is full right now. Try again in a few minutes.",
   "No se pudo crear la sala.": "Couldn't create the room.",
   "Esta cuenta no puede jugar en grupo.": "This account can't play together.",
+  "Añade un correo para salir en el ranking.": "Add an email to appear in the rankings.",
+  "No se pudo enviar el reporte. Vuelve a probar en un momento.": "Couldn't send the report. Try again in a moment.",
 });
