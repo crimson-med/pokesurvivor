@@ -137,10 +137,10 @@
         return;
       }
       // Copia de un enemigo del anfitrión: el golpe se le manda a él, que es
-      // quien decide si cae. Aquí sólo se ve (número, destello y animación).
+      // quien decide si cae. Aquí sólo se ve (número, destello y animación) y,
+      // sin escudo, la vida baja ya (ver Coop.hit).
       if (this.remote) {
-        G.Coop.hit(this, d, color, dirX, dirY, knock);
-        this.hp = Math.max(1, this.hp - d);
+        if (G.Coop.hit(this, d, color, dirX, dirY, knock)) this.hp = Math.max(1, this.hp - d);
         this.showHurt(d, color, dirX, dirY, eff);
         return;
       }

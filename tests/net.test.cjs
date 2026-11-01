@@ -138,7 +138,7 @@ test('representative busy host payload saves at least 30%; all savings are lossl
 test('real Coop.tick frames pass through the codec without changing gameplay fields', () => {
   for (const host of [true, false]) {
     const sent = [], G = {};
-    G.Net = { uid: host ? 'host' : 'guest', on() {}, onPeer() {}, slow: () => false, busy: () => false, ready: () => true,
+    G.Net = { uid: host ? 'host' : 'guest', on() {}, onPeer() {}, slow: () => false, busy: () => false, ready: () => true, load: () => 0,
       send: (uid, f) => sent.push(f), toHost: f => sent.push(f) };
     G.Player = class { constructor() { this.maxHp = 300; } };
     G.DEX_BY = { 25: { dex: 25 } }; G.baseStartOf = () => 'thundershock';
@@ -278,7 +278,7 @@ function coopWithCuts(host) {
   const timers = new Map(), lost = [], said = [], dropped = [];
   let mode = 'direct', nextT = 0;
   const G = {};
-  G.Net = { uid: host ? 'host' : 'guest', on(fn) { msgFn = fn; }, onPeer(fn) { peerFn = fn; }, slow: () => false, busy: () => false, ready: () => true,
+  G.Net = { uid: host ? 'host' : 'guest', on(fn) { msgFn = fn; }, onPeer(fn) { peerFn = fn; }, slow: () => false, busy: () => false, ready: () => true, load: () => 0,
     send() {}, toHost() {}, mode: () => mode };
   G.Player = class { constructor() { this.maxHp = 300; } };
   G.DEX_BY = { 25: { dex: 25 } }; G.baseStartOf = () => 'thundershock';
@@ -336,7 +336,7 @@ test('co-op cut mid-run: the host keeps the guest while it reconnects and remove
 test('co-op orbs: the host applies a guest orb only if the guest really has it, and buffs reach those nearby', () => {
   let msgFn = null;
   const G = {}, slept = [], slowed = [];
-  G.Net = { uid: 'host', on(fn) { msgFn = fn; }, onPeer() {}, slow: () => false, busy: () => false, ready: () => true, send() {}, toHost() {}, mode: () => 'direct' };
+  G.Net = { uid: 'host', on(fn) { msgFn = fn; }, onPeer() {}, slow: () => false, busy: () => false, ready: () => true, load: () => 0, send() {}, toHost() {}, mode: () => 'direct' };
   G.Player = class { constructor() { this.maxHp = 300; } };
   G.DEX_BY = { 25: { dex: 25 } }; G.baseStartOf = () => 'thundershock';
   G.Sprites = { preload() {} };
@@ -397,7 +397,7 @@ test('connection candidates travel together in one database message, and both fo
 function coopSums(host, mySum) {
   let msgFn = null; const got = {};
   const G = {};
-  G.Net = { uid: host ? 'host' : 'guest', on(fn) { msgFn = fn; }, onPeer() {}, slow: () => false, busy: () => false, ready: () => true, send() {}, toHost() {}, mode: () => 'direct' };
+  G.Net = { uid: host ? 'host' : 'guest', on(fn) { msgFn = fn; }, onPeer() {}, slow: () => false, busy: () => false, ready: () => true, load: () => 0, send() {}, toHost() {}, mode: () => 'direct' };
   G.Player = class { constructor() { this.maxHp = 300; } };
   G.DEX_BY = { 25: { dex: 25 }, 7: { dex: 7 } }; G.baseStartOf = () => 'thundershock';
   G.Moves = { BY_ID: { thundershock: {}, tackle: {} } }; G.Items = { BY: { leftovers: {} } };
@@ -456,7 +456,7 @@ test('co-op: a lost "I have picked" or "I am done choosing" message no longer fr
 function coopJam(host) {
   const sent = [], G = {};
   let jam = false;
-  G.Net = { uid: host ? 'host' : 'guest', on() {}, onPeer() {}, slow: () => false, busy: () => jam, ready: () => true,
+  G.Net = { uid: host ? 'host' : 'guest', on() {}, onPeer() {}, slow: () => false, busy: () => jam, ready: () => true, load: () => 0,
     send: (uid, f) => sent.push(f), toHost: f => sent.push(f) };
   G.Player = class { constructor() { this.maxHp = 300; } };
   G.DEX_BY = { 25: { dex: 25 } }; G.baseStartOf = () => 'thundershock';

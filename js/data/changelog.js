@@ -6,6 +6,12 @@
  * Cada línea en español y en inglés.
  */
 G.CHANGELOG = [
+  { d: '2026-11-02', title: ["Cooperativo: jefes y enemigos al día", "Co-op: bosses and enemies in sync"], fix: [
+    ["Cooperativo: si no eras el anfitrión, al golpear a un jefe su barra de vida bajaba, volvía a subir y bajaba otra vez. Ahora baja una vez y se queda.",
+     "Co-op: if you weren't the host, hitting a boss made its health bar drop, jump back up and drop again. Now it drops once and stays down."],
+    ["Cooperativo: si no eras el anfitrión y te movías muy deprisa o la conexión iba lenta, los enemigos podían aparecer de golpe a tu lado, ya medio derrotados. Ahora llegan a tiempo los de toda la pantalla, y con una conexión lenta se mandan antes los de cerca en vez de pararse todo.",
+     "Co-op: if you weren't the host and moved very fast or had a slow connection, enemies could suddenly pop up next to you, already half defeated. Now the ones across the whole screen arrive in time, and with a slow connection the nearby ones are sent first instead of everything freezing."]
+  ]},
   { d: '2026-11-02', title: ["Cooperativo: vuelta de las grietas", "Co-op: coming back from rifts"], fix: [
     ["Cooperativo: al acabar la pelea de una grieta, a veces un invitado se quedaba en la arena mientras los demás ya habían vuelto al mapa (pasaba si su conexión se cortaba un momento justo entonces). Ahora vuelve con los demás, y lo que se manda durante un corte ya no se pierde: sale al volver la conexión.",
      "Co-op: when a rift fight ended, a guest sometimes stayed in the arena while everyone else was already back on the map (it happened if their connection dropped for a moment right then). Now they come back with everyone else, and what is sent during a drop is no longer lost: it goes out when the connection is back."]

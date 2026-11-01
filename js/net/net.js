@@ -500,6 +500,8 @@ G.Net = (() => {
     busy(u) { const p = peers.get(u); return !!(p && p.dc && p.dc.readyState === 'open' && p.dc.bufferedAmount > BUSY_BYTES); },
     /** ¿Saldría ahora lo que se mande? Sin canal abierto (y sin relé), send() lo tira. */
     ready(u) { const p = peers.get(u); return ALLOW_RELAY || !!(p && p.dc && p.dc.readyState === 'open'); },
+    /** Bytes que le quedan por salir (0 sin canal abierto). */
+    load(u) { const p = peers.get(u); return p && p.dc && p.dc.readyState === 'open' ? p.dc.bufferedAmount : 0; },
     peers() { return [...peers.keys()]; },
     get open_() { return !!roomId; },
     get isHost() { return isHost; },
