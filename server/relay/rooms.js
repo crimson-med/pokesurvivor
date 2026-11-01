@@ -49,7 +49,7 @@ function keyOf(code) {
 }
 
 function createRooms(opts = {}) {
-  const words = opts.words || require('./words');
+  const words = opts.words || require('./words').load();
   const now = opts.now || Date.now;
   const randomInt = opts.randomInt || crypto.randomInt;
   const maxRooms = opts.maxRooms || 1000;

@@ -335,6 +335,6 @@ test('dev.html loads the config after firebase-config and socket.io then relay b
   assert.ok(at('js/net/relay-config.js') < at('js/core/db.js'));
   assert.ok(at('js/vendor/socket.io.min.js') < at('js/net/relay.js'));
   assert.ok(at('js/net/relay.js') < at('js/net/social.js'));
-  assert.match(source('js/vendor/socket.io.min.js'), /^\/\*!\n \* Socket\.IO v4\.7\.5\n/);
+  assert.match(source('js/vendor/socket.io.min.js'), /^\/\*!\n \* Socket\.IO v4\.8\.4\n/);
   assert.match(source('js/net/relay-config.js'), /^G\.RELAY_URL = '';$/m);
 });

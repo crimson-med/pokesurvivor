@@ -1,0 +1,9 @@
+# La imagen (server/Dockerfile) se construye desde la raíz: esto no entra.
+**/node_modules
+server/.data
+.git
+.claude
+docs
+videos
+tools/cache
+**/.DS_Store

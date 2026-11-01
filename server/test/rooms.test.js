@@ -3,7 +3,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createRooms, keyOf, AWAY_MS, IDLE_MS, REUSE_MS } = require('../rooms');
+const { createRooms, keyOf, AWAY_MS, IDLE_MS, REUSE_MS } = require('../relay/rooms');
 
 const WORDS = Array.from({ length: 50 }, (_, i) => i + 1);
 

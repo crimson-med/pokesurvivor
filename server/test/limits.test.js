@@ -3,7 +3,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { bucket, flood, createLimits } = require('../limits');
+const { bucket, flood, createLimits } = require('../relay/limits');
 
 test('el cubo deja cap usos y se rellena con el tiempo', () => {
   const clock = { t: 0 };
