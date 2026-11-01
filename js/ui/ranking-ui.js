@@ -1,9 +1,10 @@
-/* ============ ranking-ui.js — pantalla del ranking ============
+/* ============ ranking-ui.js: pantalla del ranking ============
  * Pestañas Solo / Grupo, periodo (diario ... histórico), todos o sólo amigos,
  * filtro por Pokémon (sólo en el histórico) y tu puesto abajo aunque no salgas
- * en el top. Lo leído se guarda 2 h (ver ranking.js).
+ * en el top. Las tablas salen del servidor (ver ranking.js).
  * Dos mitades (23-10-2026): a la izquierda el daño a Arceus y a la derecha el
- * tiempo aguantado. Salen de la misma lectura (el mismo resumen).
+ * tiempo aguantado.
+ * Los invitados ven las tablas, pero para salir en ellas hace falta un correo.
  */
 G.RankingUI = (() => {
   const $ = G.UI.$;
@@ -34,9 +35,8 @@ G.RankingUI = (() => {
   }
 
   function open() {
-    if (!G.SocialUI.needOnline()) return;
+    if (!G.DB.online) { G.UI.toast('Esto necesita la versión online del juego (con la nube).', 3200); return; }
     G.UI.show('scr-rank', true);
-    if (!G.Social.started) G.Social.start();
     $('rk-mod').classList.toggle('hidden', !G.Ranking.isAdmin());
     tabs();
     load();
@@ -73,7 +73,7 @@ G.RankingUI = (() => {
     try {
       [rows, me, dmg] = await Promise.all([
         G.Ranking.top(mode, period, dex, scope === 'friends'),
-        G.Social.me ? G.Ranking.myRank(mode, period, dex) : Promise.resolve(null),
+        G.Ranking.myRank(mode, period, dex),
         dex ? Promise.resolve(dmg) : G.Ranking.topDmg(mode, period, scope === 'friends')
       ]);
     } catch (e) {
@@ -89,18 +89,18 @@ G.RankingUI = (() => {
         ? '<p class="sub">Ninguno de tus amigos está en el top 50 de este periodo. En Histórico salen todos.</p>'
         : '<p class="sub">Todavía no hay marcas aquí. ¡Sé el primero!</p>';
     }
-    const uid = G.Social.uid;
+    const acc = G.DB.me || {}, uid = acc.uid, guest = acc.kind !== 'email';
     const b = G.Ranking.board(mode, period, dex), done = G.Ranking.reported();
-    rows.forEach((r, i) => list.appendChild(rowEl(r, i + 1, r.uids.includes(uid), b, done)));
+    rows.forEach((r, i) => list.appendChild(rowEl(r, i + 1, r.uids.includes(uid), b, done, false, !guest)));
 
     // Daño a Arceus (no hay por Pokémon).
     if (dex) dlist.innerHTML = '<p class="sub">El daño a Arceus no tiene ranking por Pokémon.</p>';
     else if (!dmg.rows.length) dlist.innerHTML = '<p class="sub">Todavía nadie le ha hecho daño a Arceus aquí. ¡Llega al minuto 30 y pégale!</p>';
     const db = G.Ranking.board(mode, period);
-    dmg.rows.forEach((r, i) => dlist.appendChild(rowEl(r, i + 1, r.uids.includes(uid), db, done, true)));
+    dmg.rows.forEach((r, i) => dlist.appendChild(rowEl(r, i + 1, r.uids.includes(uid), db, done, true, !guest)));
     const dme = $('rk-dme');
     dme.setAttribute('translate', 'no');
-    dme.textContent = dex || !dmg.me ? '' : dmg.me.out ? G.T('Aún no estás en el top 50 de daño.')
+    dme.textContent = dex || !dmg.me || guest ? '' : dmg.me.out ? G.T('Aún no estás en el top 50 de daño.')
       : G.I18n.f('Tu puesto: {x}', '#' + dmg.me.pos) + ' · ' + num(dmg.me.d);
     dme.classList.toggle('hidden', !dme.textContent);
 
@@ -110,7 +110,7 @@ G.RankingUI = (() => {
       // Otros idiomas: frases enteras sin periodo ni Pokémon (ya se ven en los filtros).
       const rk = $('rk-me');
       rk.setAttribute('translate', 'no');
-      rk.textContent = !G.Social.me ? G.T('Elige un apodo (en Amigos) para salir en el ranking.')
+      rk.textContent = guest ? G.T('Añade un correo para salir en el ranking.')
         : me && me.out ? G.T('Aún no estás en el top 50. Tu puesto está en Histórico.')
         : me ? G.I18n.f('Tu mejor puesto: {x}', pos) + ' · ' + fmt(me.t)
         : G.T('Aún no tienes marca.');
@@ -122,7 +122,7 @@ G.RankingUI = (() => {
     const where = en ? (mode === 's' ? 'solo' : 'group') + (dex ? ' with ' + mon : '')
                      : (mode === 's' ? 'en solitario' : 'en grupo') + (dex ? ' con ' + mon : '');
     $('rk-me').removeAttribute('translate');
-    $('rk-me').innerHTML = !G.Social.me ? 'Elige un apodo (en Amigos) para salir en el ranking.'
+    $('rk-me').innerHTML = guest ? 'Añade un correo para salir en el ranking.'
       : me && me.out ? (en ? `<span translate="no">You're not in the top 50 ${where} ${pn} yet. Your rank is in All-time.</span>`
                            : `Aún no estás en el top 50 ${pn} ${where}. Tu puesto está en Histórico.`)
       : me ? (en ? `<span translate="no">Your best ${where} rank ${pn}: <b class="gold">${pos}</b> · ${fmt(me.t)}</span>`
@@ -132,8 +132,8 @@ G.RankingUI = (() => {
 
   const num = n => (n || 0).toLocaleString(G.I18n.locale);
 
-  /** Una fila: de tiempo o, con dmg, de daño a Arceus. */
-  function rowEl(r, pos, mine, b, done, dmg = false) {
+  /** Una fila: de tiempo o, con dmg, de daño a Arceus. canReport: con correo (los invitados no reportan). */
+  function rowEl(r, pos, mine, b, done, dmg = false, canReport = false) {
     const el = document.createElement('div');
     el.className = 'rk-row' + (mine ? ' mine' : '') + (pos <= 3 ? ' top' + pos : '');
     el.insertAdjacentHTML('beforeend', `<span class="pos">${pos <= 3 ? G.Icons.html('trophy', 20) : ''}${pos}</span>`);
@@ -146,7 +146,7 @@ G.RankingUI = (() => {
        <span class="time">${dmg ? num(r.d) : fmt(r.t)}</span>`);
     el.querySelectorAll('.plink').forEach(a => { a.onclick = e => { e.preventDefault(); G.ProfileUI.show(a.dataset.u); }; });
     // Reportar una marca sospechosa (no la tuya). Lo revisa el admin (mod-ui.js).
-    if (!mine && G.Social.me) {
+    if (!mine && canReport) {
       const rep = document.createElement('button');
       const sent = done.has(b + '__' + r.id);
       rep.className = 'rk-rep' + (sent ? ' sent' : '');
@@ -156,8 +156,9 @@ G.RankingUI = (() => {
         if (rep.classList.contains('sent')) { G.UI.toast('Ya has reportado esta marca'); return; }
         if (!confirm('¿Reportar la marca de ' + r.names.join(', ') + ' como trampa?')) return;
         rep.classList.add('sent'); rep.title = 'Ya la has reportado';
-        await G.Ranking.report(b, r);
-        G.UI.toast('Gracias: la revisaremos');
+        if (await G.Ranking.report(b, r)) { G.UI.toast('Gracias: la revisaremos'); return; }
+        rep.classList.remove('sent'); rep.title = 'Reportar marca sospechosa';
+        G.UI.toast('No se pudo enviar el reporte. Vuelve a probar en un momento.');
       };
       el.appendChild(rep);
     } else el.appendChild(document.createElement('span'));
