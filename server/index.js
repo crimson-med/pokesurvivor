@@ -15,7 +15,9 @@
  *
  * createServer(cfg, opts) -> { app, http, relay, store, guard, listen(port, host), close() }
  * para las pruebas (opts.store, opts.mailer, opts.limits: topes de guard.js,
- * opts.now: el reloj de las sesiones y los códigos, opts.relay); `node index.js` lo arranca con process.env.
+ * opts.now: el reloj de las sesiones, los códigos y las partidas del ranking, opts.relay);
+ * deps.rank = { openCoopRun, ... } (http/rank.js), también en las opciones de attach;
+ * `node index.js` lo arranca con process.env.
  */
 'use strict';
 
@@ -46,8 +48,10 @@ function createServer(cfg, opts = {}) {
   const server = http.createServer(app);
   const guard = guardMod.create({ cfg, db, limits: opts.limits, now: opts.now });
   const mailer = opts.mailer || createMailer(cfg);
-  const relay = attach(server, { cfg, sessionOf: guard.fromCookie, ...opts.relay });
-  const deps = { cfg, db, guard, relay, mailer, now: opts.now };
+  // Las partidas del ranking (http/rank.js): el socket abre las de grupo con openCoopRun.
+  const rank = require('./http/rank').create({ cfg, db, guard, now: opts.now });
+  const relay = attach(server, { cfg, sessionOf: guard.fromCookie, rank, ...opts.relay });
+  const deps = { cfg, db, guard, relay, mailer, rank, now: opts.now };
   const version = readVersion(cfg.staticDir);
 
   app.get('/healthz', (req, res) => {
@@ -89,7 +93,7 @@ function createServer(cfg, opts = {}) {
     if (!closing) {
       closing = relay.close()   // cierra también el http.Server
         .catch(() => {})
-        .then(() => { guard.close(); db.close(); });
+        .then(() => { guard.close(); rank.close(); db.close(); });
     }
     return closing;
   }

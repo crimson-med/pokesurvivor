@@ -1185,4 +1185,6 @@ G.I18n.add({
   "El juego en grupo está lleno ahora mismo. Prueba otra vez en unos minutos.": "Group play is full right now. Try again in a few minutes.",
   "No se pudo crear la sala.": "Couldn't create the room.",
   "Para jugar en grupo necesitas una cuenta.": "Group play needs an account.",
+  "Añade un correo para salir en el ranking.": "Add an email to appear in the rankings.",
+  "No se pudo enviar el reporte. Vuelve a probar en un momento.": "Couldn't send the report. Try again in a moment.",
 });
