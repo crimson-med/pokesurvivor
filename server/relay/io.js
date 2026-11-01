@@ -1,58 +1,53 @@
-/* ============ server.js: servidor del cooperativo (salas y reenvío) ============
- * Servidor HTTP + socket.io. Hace de intermediario: salas, códigos de cuatro
- * Pokémon, la señalización de WebRTC (sig) y, para los invitados que no
- * llegan directos al anfitrión, los mensajes de la partida (m). Nunca mira lo
- * que llevan sig y m: sólo los reenvía, con el `from` que sale del token.
- * El protocolo está en docs/relay-coop/02-protocol.md.
+/* ============ relay/io.js: el socket del cooperativo (salas y reenvío) ============
+ * socket.io sobre el http.Server de index.js. Hace de intermediario: salas,
+ * códigos de cuatro Pokémon, la señalización de WebRTC (sig) y, para los
+ * invitados que no llegan directos al anfitrión, los mensajes de la partida
+ * (m). Nunca mira lo que llevan sig y m: sólo los reenvía, con el `from` de
+ * quien manda. El protocolo está en docs/relay-coop/02-protocol.md.
  *
- * Variables de entorno:
- *   PORT              puerto (8787 en local)
- *   ORIGINS           webs que pueden conectar, separadas por comas
- *   FIREBASE_PROJECT  proyecto de Firebase de los tokens
- *   AUTH_EMULATOR     1 = tokens del emulador sin firma (nunca en producción)
- *   MAX_ROOMS         salas a la vez (1000)
- *   MAX_SOCKETS       conexiones a la vez (4000)
- *   MAX_MSG_BYTES     tamaño máximo de un sig o m (262144); más grande, se tira
- *   DIRECT_WAIT_MS    espera de la conexión directa que se manda a las salas (6000)
- *   TRUST_PROXY       1 = leer la IP de Fly-Client-IP / X-Forwarded-For (sólo detrás
- *                     de un proxy que las ponga; si no, cualquiera se las inventa)
+ * attach(httpServer, deps) -> { io, rooms, limits, stats(), shutdown(why), close() }
+ *   deps.cfg     config.js (siteUrl, maxRooms, maxSockets, maxMsgBytes,
+ *                directWaitMs, trustProxy, dev)
+ *   deps.rooms, deps.limits, deps.sweepMs   para las pruebas
  *
- * GET /healthz -> { rooms, sockets, paths: { direct, server }, bytes }
+ * Entrada (provisional hasta el paso 2): fuera de producción, auth.dev =
+ * '<nombre>' es la cuenta (uid y nombre). En producción no entra nadie hasta
+ * que el paso 2 lea la sesión de la cookie.
+ *
  * Nada de lo que llevan los mensajes va al registro; las IP sólo viven en
  * memoria (límites y "misma red"), nunca se mandan a nadie.
  */
 'use strict';
 
-const http = require('http');
 const { Server } = require('socket.io');
-const { createAuth } = require('./auth');
 const { createRooms } = require('./rooms');
 const { createLimits } = require('./limits');
+const words = require('./words');
+const { isLocalOrigin } = require('../config');
 
 const VERSION = 1;
 const VERSIONS = [VERSION, VERSION - 1].filter(v => v >= 1);   // la actual y la anterior
 const CLOSED_MEMORY_MS = 10 * 60 * 1000;
+const DEV_NAME_RE = /^[\w.-]{1,32}$/;
 
 const rk = room => 'r:' + room.key;
 
-function list(s) {
-  return String(s || '').split(',').map(x => x.trim()).filter(Boolean);
+// Quién es (provisional, paso 1): sólo auth.dev y nunca en producción.
+// Devuelve { uid, name } o null.
+function identify(a, cfg) {
+  if (cfg.production) return null;
+  const dev = a.dev;
+  if (typeof dev !== 'string' || !DEV_NAME_RE.test(dev)) return null;
+  return { uid: dev, name: dev };
 }
 
-function configFromEnv(env = process.env) {
-  const num = (v, d) => (v != null && v !== '' && Number.isFinite(+v) && +v > 0 ? +v : d);
-  return {
-    port: num(env.PORT, 8787),
-    origins: env.ORIGINS ? list(env.ORIGINS) : ['http://localhost:8000', 'http://127.0.0.1:8000'],
-    project: env.FIREBASE_PROJECT || '',
-    authEmulator: env.AUTH_EMULATOR === '1',
-    nodeEnv: env.NODE_ENV || '',
-    maxRooms: num(env.MAX_ROOMS, 1000),
-    maxSockets: num(env.MAX_SOCKETS, 4000),
-    maxMsgBytes: num(env.MAX_MSG_BYTES, 256 * 1024),
-    directWaitMs: num(env.DIRECT_WAIT_MS, 6000),
-    trustProxy: env.TRUST_PROXY === '1',
-  };
+// Mismo origen que SITE_URL; en desarrollo, también localhost con otro
+// puerto. Sin Origin (no es un navegador) se deja pasar: la entrada sigue
+// pidiendo cuenta.
+function originOk(o, cfg) {
+  if (!o) return true;
+  if (o === cfg.origin) return true;
+  return !cfg.production && isLocalOrigin(o);
 }
 
 function cleanIp(ip) {
@@ -60,14 +55,16 @@ function cleanIp(ip) {
   return s.startsWith('::ffff:') ? s.slice(7) : s;
 }
 
-// IP pública: Fly-Client-IP, si no X-Forwarded-For (la primera), si no la del socket.
-function publicIp(hs, trustProxy) {
+// IP pública. Detrás de `hops` proxies de confianza (TRUST_PROXY), la que
+// puso el último de ellos en X-Forwarded-For (contando desde la derecha, como
+// Express): lo de la izquierda lo puede inventar el jugador. Sin proxy, o si
+// la cabecera trae menos, la del socket.
+function publicIp(hs, hops) {
   const h = hs.headers || {};
-  if (trustProxy) {
-    for (const name of ['fly-client-ip', 'x-forwarded-for']) {
-      const first = String(h[name] || '').split(',')[0].trim();
-      if (first) return cleanIp(first);
-    }
+  const n = Number(hops) || 0;
+  if (n > 0) {
+    const xff = String(h['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(Boolean);
+    if (xff.length >= n) return cleanIp(xff[xff.length - n]);
   }
   return cleanIp(hs.address);
 }
@@ -83,41 +80,25 @@ function sizeOf(x) {
 
 const isSeq = n => Number.isSafeInteger(n) && n >= 0;
 
-function createServer(cfg = {}) {
-  const c = { ...configFromEnv({}), ...cfg };
-  const auth = c.auth || createAuth({ emulator: c.authEmulator, project: c.project, nodeEnv: c.nodeEnv });
-  const rooms = c.rooms || createRooms({ maxRooms: c.maxRooms, directWaitMs: c.directWaitMs });
-  const limits = createLimits(c.limits);
+function attach(httpServer, deps = {}) {
+  const c = deps.cfg;
+  if (!c) throw new Error('attach: falta deps.cfg');
+  const rooms = deps.rooms || createRooms({ maxRooms: c.maxRooms, directWaitMs: c.directWaitMs, words: words.load(c.staticDir) });
+  const limits = deps.limits || createLimits();
   const sockets = new Map();        // uid -> socket actual
   const closedAway = new Map();     // uid -> { why, at }: perdió la sala mientras estaba caído
   let relayed = 0;                  // bytes reenviados (sig + m)
-  const anyOrigin = c.origins.includes('*');
-
-  const httpServer = http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url.split('?')[0] === '/healthz') {
-      const s = rooms.stats();
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      res.end(JSON.stringify({ rooms: s.rooms, sockets: sockets.size, paths: s.paths, bytes: relayed }));
-      return;
-    }
-    res.writeHead(404, { 'content-type': 'text/plain' });
-    res.end('not found');
-  });
 
   const io = new Server(httpServer, {
-    cors: { origin: anyOrigin ? true : c.origins },
     // Tope duro del transporte: el doble del máximo, para que un mensaje algo
     // grande llegue al manejador y se tire allí sin cortar la conexión.
     maxHttpBufferSize: c.maxMsgBytes * 2,
     pingInterval: 10000,
     pingTimeout: 10000,
     connectionStateRecovery: { maxDisconnectionDuration: 120000 },
-    // CORS no frena a los websockets: el origen se mira aquí. Sin Origin
-    // (no es un navegador) se deja pasar: el token sigue siendo obligatorio.
-    allowRequest: (req, cb) => {
-      const o = req.headers.origin;
-      cb(null, anyOrigin || !o || c.origins.includes(o));
-    },
+    // Mismo origen: sin CORS. Los websockets no lo respetan, así que el
+    // origen se mira aquí.
+    allowRequest: (req, cb) => cb(null, originOk(req.headers.origin, c)),
   });
 
   // ---------- Aplicar lo que devuelve rooms.js ----------
@@ -183,16 +164,16 @@ function createServer(cfg = {}) {
     return true;
   }
 
-  // ---------- Entrada: versión, token, capacidad ----------
-  io.use(async (socket, next) => {
+  // ---------- Entrada: versión, cuenta, capacidad ----------
+  io.use((socket, next) => {
     const a = socket.handshake.auth || {};
     if (!VERSIONS.includes(a.v)) return next(new Error('old-version'));
-    let who;
-    try { who = await auth.verify(a.token); } catch { return next(new Error('bad-token')); }
+    const who = identify(a, c);
+    if (!who) return next(new Error('signed-out'));
     if (sockets.size >= c.maxSockets && !sockets.has(who.uid)) return next(new Error('busy'));
     socket.data.uid = who.uid;
     socket.data.v = a.v;
-    socket.data.info = { name: a.name, dex: a.dex, shiny: a.shiny };
+    socket.data.info = { name: who.name, dex: a.dex, shiny: a.shiny };
     socket.data.ip = publicIp(socket.handshake, c.trustProxy);
     next();
   });
@@ -265,7 +246,8 @@ function createServer(cfg = {}) {
     socket.on('member', p0 => {
       const [p] = args(p0);
       if (!ctl()) return;
-      socket.data.info = { name: p.name, dex: p.dex, shiny: p.shiny };
+      // El nombre es el de la cuenta (de la entrada): sólo cambian dex y shiny.
+      socket.data.info = { name: socket.data.info.name, dex: p.dex, shiny: p.shiny };
       apply(rooms.update(uid, socket.data.info));
     });
 
@@ -343,20 +325,10 @@ function createServer(cfg = {}) {
     apply(rooms.expire());
     const t = Date.now();
     for (const [k, x] of closedAway) if (t - x.at >= CLOSED_MEMORY_MS) closedAway.delete(k);
-  }, c.sweepMs || 1000);
+  }, deps.sweepMs || 1000);
   const clean = setInterval(() => limits.clean(), 60000);
   sweep.unref();
   clean.unref();
-
-  function listen(port = c.port, host) {
-    return new Promise((resolve, reject) => {
-      httpServer.once('error', reject);
-      httpServer.listen(port, host, () => {
-        httpServer.off('error', reject);
-        resolve(httpServer.address().port);
-      });
-    });
-  }
 
   // Aviso a todas las salas (al reiniciar el servidor) y cierre.
   function shutdown(why = 'server-restart') {
@@ -369,30 +341,12 @@ function createServer(cfg = {}) {
     return new Promise(resolve => io.close(() => resolve()));
   }
 
-  return { http: httpServer, io, rooms, limits, listen, shutdown, close, stats: () => ({ sockets: sockets.size, bytes: relayed }) };
-}
-
-module.exports = { createServer, configFromEnv, publicIp, sizeOf, VERSION };
-
-if (require.main === module) {
-  const cfg = configFromEnv();
-  let srv;
-  try {
-    srv = createServer(cfg);
-  } catch (e) {
-    console.error('[relay] no arranca: ' + e.message);
-    process.exit(1);
+  function stats() {
+    const r = rooms.stats();
+    return { rooms: r.rooms, sockets: sockets.size, paths: r.paths, bytes: relayed };
   }
-  srv.listen(cfg.port).then(port => {
-    console.log('[relay] escuchando en el puerto ' + port + (cfg.authEmulator ? ' (emulador de Auth)' : ''));
-  }, e => {
-    console.error('[relay] no se pudo abrir el puerto: ' + e.message);
-    process.exit(1);
-  });
-  const bye = () => {
-    srv.shutdown('server-restart');
-    setTimeout(() => srv.close().then(() => process.exit(0)), 300);
-  };
-  process.on('SIGTERM', bye);
-  process.on('SIGINT', bye);
+
+  return { io, rooms, limits, stats, shutdown, close };
 }
+
+module.exports = { attach, publicIp, sizeOf, originOk, VERSION };

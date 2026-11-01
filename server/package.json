@@ -1,0 +1,26 @@
+{
+  "name": "pokesurvivor-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Servidor de PokeSurvivor: el juego, la API, el cooperativo y SQLite",
+  "type": "commonjs",
+  "main": "index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "cookie": "2.0.1",
+    "express": "4.22.3",
+    "nodemailer": "10.1.7",
+    "socket.io": "4.8.4"
+  },
+  "devDependencies": {
+    "socket.io-client": "4.8.4"
+  }
+}

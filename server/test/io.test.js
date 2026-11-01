@@ -1,35 +1,37 @@
-/* ============ server.test.js: el servidor de verdad, con sockets en 127.0.0.1 ============ */
+/* ============ io.test.js: el socket de verdad, con clientes en 127.0.0.1 ============ */
 'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { io: ioc } = require('socket.io-client');
-const { createServer, publicIp } = require('../server');
-const { createRooms } = require('../rooms');
+const { createServer } = require('../index');
+const { loadConfig } = require('../config');
+const { publicIp, originOk } = require('../relay/io');
+const { createRooms } = require('../relay/rooms');
+const { createLimits } = require('../relay/limits');
+const store = require('../db');
 
-const PROJECT = 'demo-pokesurvivor';
 const ORIGIN = 'http://localhost:8000';
 const WORDS = Array.from({ length: 100 }, (_, i) => i + 1);
-
-const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url');
-// Token como los del emulador de Auth: sin firma.
-function token(sub, aud = PROJECT) {
-  const t = Math.floor(Date.now() / 1000);
-  return b64({ alg: 'none', typ: 'JWT' }) + '.' +
-    b64({ sub, user_id: sub, aud, iss: 'https://securetoken.google.com/' + aud, iat: t, exp: t + 3600 }) + '.';
-}
 
 let srv, url;
 const open = [];
 
-test.before(async () => {
-  srv = createServer({
-    authEmulator: true, project: PROJECT, origins: [ORIGIN],
-    rooms: createRooms({ words: WORDS }),
-    // Todos los clientes de la prueba vienen de 127.0.0.1: el tope por IP se
-    // sube aquí (se prueba en limits.test.js) y queda el de la cuenta.
-    limits: { joinIp: [1000, 60000] },
+function start(env = {}) {
+  const cfg = loadConfig({ SITE_URL: ORIGIN, ...env });
+  return createServer(cfg, {
+    store: store.open(':memory:', { log: false }),
+    relay: {
+      rooms: createRooms({ words: WORDS }),
+      // Todos los clientes de la prueba vienen de 127.0.0.1: el tope por IP se
+      // sube aquí (se prueba en limits.test.js) y queda el de la cuenta.
+      limits: createLimits({ joinIp: [1000, 60000] }),
+    },
   });
+}
+
+test.before(async () => {
+  srv = start();
   const port = await srv.listen(0, '127.0.0.1');
   url = 'http://127.0.0.1:' + port;
 });
@@ -40,8 +42,8 @@ test.after(async () => {
 });
 
 function client(uid, o = {}) {
-  const s = ioc(url, {
-    auth: { v: 1, token: token(uid), name: uid, dex: 25, shiny: false, ...o.auth },
+  const s = ioc(o.url || url, {
+    auth: { v: 1, dev: uid, dex: 25, shiny: false, ...o.auth },
     transports: ['websocket'], reconnection: false, forceNew: true,
     extraHeaders: o.headers,
   });
@@ -91,17 +93,26 @@ test('una v distinta se rechaza con old-version', async () => {
   assert.equal(err.message, 'old-version');
 });
 
-test('token del emulador vale; uno basura o de otro proyecto no', async () => {
+test('auth.dev vale (provisional, paso 2); sin él o con uno raro: signed-out', async () => {
   await connected(client('ok1'));
-  const bad = await connected(client('x', { auth: { token: 'basura' } })).catch(e => e);
-  assert.equal(bad.message, 'bad-token');
-  const other = await connected(client('x', { auth: { token: token('x', 'otro-proyecto') } })).catch(e => e);
-  assert.equal(other.message, 'bad-token');
-  const none = await connected(client('x', { auth: { token: undefined } })).catch(e => e);
-  assert.equal(none.message, 'bad-token');
+  for (const dev of [undefined, '', 'con espacio', 'x'.repeat(33), 42]) {
+    const err = await connected(client('x', { auth: { dev } })).catch(e => e);
+    assert.equal(err.message, 'signed-out');
+  }
 });
 
-test('un origen que no está en ORIGINS no conecta', async () => {
+test('en producción auth.dev no vale', async () => {
+  const prod = start({ NODE_ENV: 'production', CODE_PEPPER: 'prueba' });
+  const port = await prod.listen(0, '127.0.0.1');
+  try {
+    const err = await connected(client('p1', { url: 'http://127.0.0.1:' + port })).catch(e => e);
+    assert.equal(err.message, 'signed-out');
+  } finally {
+    await prod.close();
+  }
+});
+
+test('un origen que no es SITE_URL no conecta', async () => {
   const err = await connected(client('o1', { headers: { origin: 'https://otra.web' } })).catch(e => e);
   assert.ok(err instanceof Error);
   await connected(client('o2', { headers: { origin: ORIGIN } }));
@@ -278,24 +289,38 @@ test('el anfitrión se va: closed(host-left) para el invitado', async () => {
 test('al reiniciar se avisa closed(server-restart)', async () => {
   const { guest } = await hostAndGuest('hk', 'gk');
   const closed = once(guest, 'closed');
-  srv.shutdown('server-restart');
+  srv.relay.shutdown('server-restart');
   assert.deepEqual(await closed, ['server-restart']);
 });
 
-test('/healthz responde', async () => {
-  const r = await fetch(url + '/healthz');
-  assert.equal(r.status, 200);
-  const j = await r.json();
-  assert.equal(typeof j.rooms, 'number');
-  assert.equal(typeof j.sockets, 'number');
-  assert.deepEqual(Object.keys(j.paths).sort(), ['direct', 'server']);
-  assert.equal((await fetch(url + '/otra')).status, 404);
+test('origen: SITE_URL, sin Origin, y localhost sólo en desarrollo', () => {
+  const dev = loadConfig({ SITE_URL: 'https://play.example.com' });
+  const prod = loadConfig({ SITE_URL: 'https://play.example.com', NODE_ENV: 'production', CODE_PEPPER: 'x' });
+  for (const cfg of [dev, prod]) {
+    assert.equal(originOk(undefined, cfg), true);
+    assert.equal(originOk('https://play.example.com', cfg), true);
+    assert.equal(originOk('https://otra.web', cfg), false);
+    assert.equal(originOk('https://play.example.com.otra.web', cfg), false);
+  }
+  assert.equal(originOk('http://localhost:5173', dev), true);
+  assert.equal(originOk('http://localhost:5173', prod), false);
 });
 
-test('IP pública: Fly-Client-IP, si no X-Forwarded-For, si no la del socket', () => {
+test('IP pública: la que puso el último proxy de confianza en X-Forwarded-For, si no la del socket', () => {
   const hs = (headers, address = '::ffff:10.0.0.1') => ({ headers, address });
-  assert.equal(publicIp(hs({ 'fly-client-ip': '5.5.5.5', 'x-forwarded-for': '6.6.6.6' }), true), '5.5.5.5');
-  assert.equal(publicIp(hs({ 'x-forwarded-for': '6.6.6.6, 7.7.7.7' }), true), '6.6.6.6');
-  assert.equal(publicIp(hs({}), true), '10.0.0.1');
-  assert.equal(publicIp(hs({ 'x-forwarded-for': '6.6.6.6' }), false), '10.0.0.1');
+  // Lo que inventa el jugador queda a la izquierda: no cuenta.
+  assert.equal(publicIp(hs({ 'x-forwarded-for': '6.6.6.6, 7.7.7.7' }), 1), '7.7.7.7');
+  assert.equal(publicIp(hs({ 'x-forwarded-for': '6.6.6.6, 7.7.7.7, 8.8.8.8' }), 2), '7.7.7.7');
+  assert.equal(publicIp(hs({ 'fly-client-ip': '5.5.5.5', 'x-forwarded-for': '::ffff:6.6.6.6' }), 1), '6.6.6.6');
+  assert.equal(publicIp(hs({ 'x-forwarded-for': '6.6.6.6' }), 2), '10.0.0.1');
+  assert.equal(publicIp(hs({}), 1), '10.0.0.1');
+  assert.equal(publicIp(hs({ 'x-forwarded-for': '6.6.6.6' }), 0), '10.0.0.1');
+});
+
+test('member cambia dex y shiny, no el nombre de la cuenta', async () => {
+  const { host, guest } = await hostAndGuest('hm', 'gm');
+  const ev = once(host, 'room');
+  guest.emit('member', { name: 'hm', dex: 7, shiny: true });
+  const [snap] = await ev;
+  assert.deepEqual(snap.members[1], { uid: 'gm', name: 'gm', dex: 7, shiny: true, online: true, path: null, sameNet: true, hideIp: false });
 });
