@@ -5,14 +5,17 @@
  * (m). Nunca mira lo que llevan sig y m: sólo los reenvía, con el `from` de
  * quien manda. El protocolo está en docs/relay-coop/02-protocol.md.
  *
- * attach(httpServer, deps) -> { io, rooms, limits, stats(), shutdown(why), close() }
- *   deps.cfg     config.js (siteUrl, maxRooms, maxSockets, maxMsgBytes,
- *                directWaitMs, trustProxy, dev)
+ * attach(httpServer, deps) -> { io, rooms, limits, stats(), shutdown(why), kick(uid, hash), close() }
+ *   deps.cfg        config.js (siteUrl, maxRooms, maxSockets, maxMsgBytes,
+ *                   directWaitMs, trustProxy, dev)
+ *   deps.sessionOf  cabecera Cookie -> { uid, name, kind, hash } o null
+ *                   (guard.fromCookie, la sesión ps_sid de http/guard.js)
  *   deps.rooms, deps.limits, deps.sweepMs   para las pruebas
  *
- * Entrada (provisional hasta el paso 2): fuera de producción, auth.dev =
- * '<nombre>' es la cuenta (uid y nombre). En producción no entra nadie hasta
- * que el paso 2 lea la sesión de la cookie.
+ * Entrada: la cookie de la sesión, que el navegador manda en el handshake
+ * (mismo origen). Sin sesión válida: signed-out. El nombre es el de la cuenta.
+ * kick(uid, hash) cierra los sockets de una cuenta (con hash, sólo los de esa
+ * sesión): al salir, salir de todas partes o borrar la cuenta.
  *
  * Nada de lo que llevan los mensajes va al registro; las IP sólo viven en
  * memoria (límites y "misma red"), nunca se mandan a nadie.
@@ -28,22 +31,12 @@ const { isLocalOrigin } = require('../config');
 const VERSION = 1;
 const VERSIONS = [VERSION, VERSION - 1].filter(v => v >= 1);   // la actual y la anterior
 const CLOSED_MEMORY_MS = 10 * 60 * 1000;
-const DEV_NAME_RE = /^[\w.-]{1,32}$/;
 
 const rk = room => 'r:' + room.key;
 
-// Quién es (provisional, paso 1): sólo auth.dev y nunca en producción.
-// Devuelve { uid, name } o null.
-function identify(a, cfg) {
-  if (cfg.production) return null;
-  const dev = a.dev;
-  if (typeof dev !== 'string' || !DEV_NAME_RE.test(dev)) return null;
-  return { uid: dev, name: dev };
-}
-
 // Mismo origen que SITE_URL; en desarrollo, también localhost con otro
 // puerto. Sin Origin (no es un navegador) se deja pasar: la entrada sigue
-// pidiendo cuenta.
+// pidiendo la cookie de la sesión.
 function originOk(o, cfg) {
   if (!o) return true;
   if (o === cfg.origin) return true;
@@ -85,6 +78,7 @@ function attach(httpServer, deps = {}) {
   if (!c) throw new Error('attach: falta deps.cfg');
   const rooms = deps.rooms || createRooms({ maxRooms: c.maxRooms, directWaitMs: c.directWaitMs, words: words.load(c.staticDir) });
   const limits = deps.limits || createLimits();
+  const sessionOf = deps.sessionOf || (() => null);
   const sockets = new Map();        // uid -> socket actual
   const closedAway = new Map();     // uid -> { why, at }: perdió la sala mientras estaba caído
   let relayed = 0;                  // bytes reenviados (sig + m)
@@ -95,7 +89,9 @@ function attach(httpServer, deps = {}) {
     maxHttpBufferSize: c.maxMsgBytes * 2,
     pingInterval: 10000,
     pingTimeout: 10000,
-    connectionStateRecovery: { maxDisconnectionDuration: 120000 },
+    // Al recuperar una conexión también se mira la cookie (si no, una sesión
+    // cerrada mientras estaba caído volvería a entrar).
+    connectionStateRecovery: { maxDisconnectionDuration: 120000, skipMiddlewares: false },
     // Mismo origen: sin CORS. Los websockets no lo respetan, así que el
     // origen se mira aquí.
     allowRequest: (req, cb) => cb(null, originOk(req.headers.origin, c)),
@@ -168,10 +164,12 @@ function attach(httpServer, deps = {}) {
   io.use((socket, next) => {
     const a = socket.handshake.auth || {};
     if (!VERSIONS.includes(a.v)) return next(new Error('old-version'));
-    const who = identify(a, c);
+    let who = null;
+    try { who = sessionOf(socket.request.headers.cookie); } catch (e) { console.error('[io] sesión: ' + e.message); }
     if (!who) return next(new Error('signed-out'));
     if (sockets.size >= c.maxSockets && !sockets.has(who.uid)) return next(new Error('busy'));
     socket.data.uid = who.uid;
+    socket.data.session = who.hash;
     socket.data.v = a.v;
     socket.data.info = { name: who.name, dex: a.dex, shiny: a.shiny };
     socket.data.ip = publicIp(socket.handshake, c.trustProxy);
@@ -335,6 +333,13 @@ function attach(httpServer, deps = {}) {
     for (const room of rooms.all()) io.to(rk(room)).emit('closed', why);
   }
 
+  // Cierra los sockets de una cuenta (o sólo los de una sesión): sesión borrada.
+  function kick(uid, hash) {
+    for (const s of io.sockets.sockets.values()) {
+      if (s.data.uid === uid && (!hash || s.data.session === hash)) s.disconnect(true);
+    }
+  }
+
   function close() {
     clearInterval(sweep);
     clearInterval(clean);
@@ -346,7 +351,7 @@ function attach(httpServer, deps = {}) {
     return { rooms: r.rooms, sockets: sockets.size, paths: r.paths, bytes: relayed };
   }
 
-  return { io, rooms, limits, stats, shutdown, close };
+  return { io, rooms, limits, stats, shutdown, kick, close };
 }
 
 module.exports = { attach, publicIp, sizeOf, originOk, VERSION };

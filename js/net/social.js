@@ -74,7 +74,8 @@ G.Social = (() => {
 
   /** Tras iniciar sesión. → 'ok' | 'need-nick' | 'off' (sin nube) */
   async function start() {
-    if (!G.DB.online) return 'off';
+    // Sin Firebase (G.DB.fb, desde el paso 2) no hay amigos todavía: como sin nube.
+    if (!G.DB.online || !G.DB.fb) return 'off';
     if (started) return me ? 'ok' : 'need-nick';
     fb = G.DB.fb; uid = fb.uid;
     started = true;

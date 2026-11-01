@@ -66,8 +66,9 @@ test('producción con STATIC_DIR en la raíz del repositorio: server/ tampoco se
 });
 
 test('/api/x desconocida: 404 en JSON', async () => {
+  const headers = { 'x-ps': '1', origin: 'http://localhost:8000' };
   for (const [method, p] of [['GET', '/api/x'], ['POST', '/api/x/y'], ['GET', '/api']]) {
-    const r = await fetch(dev.url + p, { method });
+    const r = await fetch(dev.url + p, { method, headers });
     assert.equal(r.status, 404, method + ' ' + p);
     assert.match(r.headers.get('content-type'), /application\/json/);
     assert.deepEqual(await r.json(), { error: 'not-found' });
@@ -130,8 +131,6 @@ test('guard: fail y body (JSON mal formado, demasiado grande)', async () => {
   const app = express();
   app.post('/t', guard.body(64), (req, res) => res.json({ got: req.body }));
   app.get('/f', (req, res) => guard.fail(res, 409, 'taken'));
-  app.post('/s', guard.needSession, (req, res) => res.json({}));
-  app.post('/c', guard.csrf, (req, res) => res.json({}));
   const http = require('http').createServer(app);
   await new Promise(r => http.listen(0, '127.0.0.1', r));
   const u = 'http://127.0.0.1:' + http.address().port;
@@ -147,9 +146,6 @@ test('guard: fail y body (JSON mal formado, demasiado grande)', async () => {
     r = await fetch(u + '/f');
     assert.equal(r.status, 409);
     assert.deepEqual(await r.json(), { error: 'taken' });
-    // Hasta el paso 2, cerrados.
-    assert.equal((await post('/s', '{}')).status, 401);
-    assert.equal((await post('/c', '{}')).status, 403);
   } finally {
     await new Promise(r => http.close(r));
   }

@@ -3,7 +3,8 @@
  * gasta una; sin fichas, se rechaza. Un mapa por clave (cuenta o IP: los
  * límites "por socket" van por cuenta, para que reconectar no los vacíe);
  * clean() borra los cubos que ya se han rellenado del todo, así nada (las IP
- * tampoco) se queda en memoria más de lo que dura su ventana.
+ * tampoco) se queda en memoria más de lo que dura su ventana; wait(clave), lo
+ * que falta para la próxima ficha (la API lo manda en Retry-After).
  *
  * Números de docs/relay-coop/02-protocol.md (Limits):
  *   m      120 por segundo (y si se pasa 3 s seguidos, se le corta)
@@ -30,6 +31,13 @@ function bucket(cap, windowMs, now = Date.now) {
       if (b.n < 1) return false;
       b.n -= 1;
       return true;
+    },
+    // Milisegundos hasta la próxima ficha (0 si ya hay): para Retry-After.
+    wait(key) {
+      const b = map.get(key);
+      if (!b) return 0;
+      fill(b, now());
+      return b.n >= 1 ? 0 : Math.ceil((1 - b.n) / rate);
     },
     drop(key) { map.delete(key); },
     clean() {

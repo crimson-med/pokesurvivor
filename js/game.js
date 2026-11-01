@@ -1138,7 +1138,7 @@ G.Flow = {
     if (G.Game.state !== 'ui') G.Game.toUI();
     G.Audio.music('village');
     G.MenuUI.open();
-    if (!G.LoginUI.updateNotices()) G.LoginUI.offerRecovery();
+    G.LoginUI.updateNotices();
   },
   /** Al cerrar el resumen: a la sala si sigues en una, si no al menú. */
   afterRun() {

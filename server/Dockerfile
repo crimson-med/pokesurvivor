@@ -21,6 +21,8 @@ RUN node tools/build.js && node tools/export_data.js
 FROM node:22-bookworm-slim
 WORKDIR /app
 COPY --from=build /src/server ./server
+# La fusión de partidas es la del juego (server/http/auth.js la carga de ../js/core).
+COPY --from=build /src/js/core/save-merge.js ./js/core/save-merge.js
 COPY --from=build /src/index.html /src/version.json /src/sw.js /src/manifest.webmanifest /src/favicon.ico ./public/
 COPY --from=build /src/js ./public/js
 COPY --from=build /src/css ./public/css
