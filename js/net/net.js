@@ -697,9 +697,10 @@ G.Net = (() => {
     try { if (p.dc) p.dc.close(); } catch (e) { /* nada */ }
     try { if (p.pc) p.pc.close(); } catch (e) { /* nada */ }
     peers.delete(u);
-    // Se ha ido de verdad: su numeración empieza de nuevo. Al rehacer la conexión
-    // (silent) se sigue con la misma, para no tirar nada que aún venga de camino.
-    if (!silent) forgetPair(u);
+    // Se ha ido de verdad: su numeración empieza de nuevo (y si vuelve con otra carga
+    // de la página, no hace falta rehacer nada). Al rehacer la conexión (silent) se
+    // sigue con la misma, para no tirar nada que aún venga de camino.
+    if (!silent) { forgetPair(u); eps.delete(u); }
     if (!silent) emitPeer(u);
   }
 

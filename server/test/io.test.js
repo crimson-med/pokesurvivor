@@ -329,15 +329,19 @@ test('start abre la partida en grupo del ranking (deps.rank.openCoopRun) y su ru
     assert.deepEqual(coopRuns, [], 'only when the host really starts');
     assert.deepEqual(await req(host, 'start', {}), { ok: true, run: 'run-1' });
     assert.deepEqual(coopRuns, [['hr', ['hr', 'gr'], 'playing']]);
+    // Otro start jugando no abre otra partida.
+    assert.deepEqual(await req(host, 'start', {}), { ok: true, run: null });
+    assert.equal(coopRuns.length, 1);
+    const again = async () => { await req(host, 'end', {}); return req(host, 'start', {}); };
     // Promesa o fallo: la partida empieza igual (sin run si falla).
     rank = { openCoopRun: async () => ({ id: 'run-2' }) };
-    assert.deepEqual(await req(host, 'start', {}), { ok: true, run: { id: 'run-2' } });
+    assert.deepEqual(await again(), { ok: true, run: { id: 'run-2' } });
     const err = console.error; console.error = () => {};
     try {
       rank = { openCoopRun: () => { throw new Error('db'); } };
-      assert.deepEqual(await req(host, 'start', {}), { ok: true, run: null });
+      assert.deepEqual(await again(), { ok: true, run: null });
       rank = { openCoopRun: async () => { throw new Error('db'); } };
-      assert.deepEqual(await req(host, 'start', {}), { ok: true, run: null });
+      assert.deepEqual(await again(), { ok: true, run: null });
     } finally { console.error = err; }
   } finally { rank = null; }
 });
@@ -349,7 +353,7 @@ test('ep: el invitado que recarga vuelve con otro ep y el anfitrión lo ve en la
   guest.close();
   await away; await awayRoom;
   const online = once(host, 'peer');
-  const roomEv = once(host, 'room');   // (peer y room salen juntos: online primero)
+  const roomEv = once(host, 'room');   // (salen juntos: la foto antes que peer, ver apply en io.js)
   await connected(client('gep', { auth: { ep: 'recargada' } }));
   assert.deepEqual(await online, ['gep', 'online']);
   const [snap] = await roomEv;

@@ -38,6 +38,7 @@ function server(opts = {}) {
       const code = CODES[n++ % CODES.length];
       const room = { code, state: 'lobby', mode: p.mode, host: u, members: [member(u)] };
       rooms.set(key(code), room);
+      push(room);                      // (como io.js: la foto sale antes que la respuesta)
       return { ok: true, code, room: snap(room) };
     }
     if (ev === 'join') {
@@ -47,7 +48,7 @@ function server(opts = {}) {
       if (room.state === 'playing') return { ok: false, err: 'started' };
       if (room.members.length >= 4) return { ok: false, err: 'full' };
       room.members.push(member(u, { sameNet: srv.sameNet, hideIp: !!p.hideIp, path: p.hideIp ? 'server' : null }));
-      setImmediate(() => push(room));
+      push(room);                      // (como io.js: la foto sale antes que la respuesta)
       return { ok: true, room: snap(room), sameNet: srv.sameNet };
     }
     if (!r) return { ok: false, err: 'not-in-room' };
@@ -86,6 +87,7 @@ function fakeRelay(srv, uid, info, connectErr) {
     async request(ev, p) {
       calls.push([ev, clone(p)]);
       const a = srv.handle(uid, ev, clone(p));
+      await new Promise(r => setImmediate(r));   // la respuesta llega después de lo que ya mandó el servidor
       if (a && a.ok === false) throw codeErr(a.err);
       if (a && a.room) R.room = a.room;
       return a;
@@ -274,7 +276,6 @@ test('createRoom: connects, sends create (direct by default) and gives the usual
   assert.equal(r.host, 'H1');
   assert.equal(r.isHost, true);
   assert.equal(r.open, true);
-  assert.equal(r.lost, false);
   assert.deepEqual(clone(r.members), [{ uid: 'H1', name: 'Ash', dex: 6, shiny: true, online: true, path: null, sameNet: false, hideIp: false }]);
   assert.ok(p.events.includes('room'));
   assert.equal(await p.S.createRoom(), r, 'already in a room: the same one');

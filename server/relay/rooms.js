@@ -184,7 +184,9 @@ function createRooms(opts = {}) {
   function reattach(room, m, o, f) {
     if (o.sid) m.sid = o.sid;
     if (o.pubIp) m.pubIp = o.pubIp;
-    if (o.ep) m.ep = o.ep;
+    // Otra carga de la página (ha recargado): la conexión se rehace desde cero, así que
+    // el camino de antes ya no vale (el anfitrión dirá el nuevo con 'path').
+    if (o.ep && o.ep !== m.ep) { m.ep = o.ep; m.path = null; }
     if (!m.online) {
       m.online = true;
       m.awayAt = null;

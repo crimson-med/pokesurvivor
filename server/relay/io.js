@@ -13,7 +13,8 @@
  *   deps.rank       (opcional) rankings: openCoopRun(sala) -> run o null, al
  *                   empezar el anfitrión una partida (start)
  *   deps.db         (opcional) la base de datos: para no dejar entrar a una
- *                   cuenta baneada (users.banned)
+ *                   cuenta baneada (users.banned, o su correo en bans con
+ *                   deps.rank.standing)
  *   deps.rooms, deps.limits, deps.sweepMs   para las pruebas
  *
  * Entrada: auth { v: 2, dex, shiny, ep } y la cookie de la sesión, que el
@@ -88,11 +89,15 @@ function attach(httpServer, deps = {}) {
   const rooms = deps.rooms || createRooms({ maxRooms: c.maxRooms, directWaitMs: c.directWaitMs, words: words.load(c.staticDir) });
   const limits = deps.limits || createLimits();
   const sessionOf = deps.sessionOf || (() => null);
-  const bannedQ = deps.db ? deps.db.prep('SELECT banned FROM users WHERE uid = ?') : null;
+  // Baneada: users.banned o, si el ranking lo sabe (rank.standing), su correo en bans
+  // (que queda aunque se borre la cuenta y se vuelva a hacer con el mismo).
+  const userQ = deps.db ? deps.db.prep('SELECT uid, kind, email, name, banned FROM users WHERE uid = ?') : null;
   const isBanned = who => {
     if (who.banned) return true;
-    const row = bannedQ && bannedQ.get(who.uid);
-    return !!(row && row.banned);
+    const u = userQ && userQ.get(who.uid);
+    if (!u) return false;
+    if (u.banned) return true;
+    return !!(deps.rank && deps.rank.standing && deps.rank.standing(u) === 'banned');
   };
   const sockets = new Map();        // uid -> socket actual
   const closedAway = new Map();     // uid -> { why, at }: perdió la sala mientras estaba caído
@@ -274,14 +279,17 @@ function attach(httpServer, deps = {}) {
     socket.on('start', (p0, cb0) => {
       const [, cb] = args(p0, cb0);
       if (!ctl(cb)) return;
+      const before = rooms.roomOf(uid);
+      const fresh = !!(before && before.state === 'lobby');
       const f = rooms.start(uid);
       apply(f);
       if (!f.ok) return reply(cb, { ok: false, err: f.err });
+      // Una partida por start de verdad (de la sala de espera): repetir start jugando no
+      // abre otra (si no, el anfitrión podría elegir la que más le conviniera).
       // (Puede devolver el run o una promesa con él; si falla, la partida sigue sin ranking.)
-      const room = rooms.roomOf(uid);
       let run = null;
       try {
-        run = deps.rank && deps.rank.openCoopRun ? deps.rank.openCoopRun(room) : null;
+        run = fresh && deps.rank && deps.rank.openCoopRun ? deps.rank.openCoopRun(before) : null;
       } catch (e) { console.error('[io] openCoopRun: ' + e.message); }
       Promise.resolve(run)
         .catch(e => { console.error('[io] openCoopRun: ' + (e && e.message)); return null; })

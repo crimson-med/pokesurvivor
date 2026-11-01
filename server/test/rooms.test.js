@@ -51,13 +51,17 @@ test('ep: cada jugador lleva el de su conexión; al volver con otro, cambia en l
   guest(r, code, 'g', { ep: 'eg1' });
   const ep = () => r.snapshot(r.roomOf('h')).members.map(m => [m.uid, m.ep]);
   assert.deepEqual(ep(), [['h', 'eh1'], ['g', 'eg1']]);
+  r.path('h', 'g', 'server');
   r.markAway('g', 's-g');
   const back = r.markBack('g', { sid: 's-g2', ep: 'eg2' });
   assert.ok(back.changed.has(r.roomOf('h')));
   assert.deepEqual(ep(), [['h', 'eh1'], ['g', 'eg2']]);
+  assert.equal(r.roomOf('h').members.get('g').path, null, 'a reload redoes the connection: the old path is gone');
+  r.path('h', 'g', 'server');
   // Un socket recuperado (sin ep nuevo) no lo cambia; volver a entrar con el código, sí.
   r.markBack('g', { sid: 's-g2' });
   assert.deepEqual(ep(), [['h', 'eh1'], ['g', 'eg2']]);
+  assert.equal(r.roomOf('h').members.get('g').path, 'server', 'a reconnect keeps it');
   guest(r, code, 'g', { ep: 'eg3' });
   assert.deepEqual(ep(), [['h', 'eh1'], ['g', 'eg3']]);
 });

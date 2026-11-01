@@ -173,7 +173,7 @@ G.Social = (() => {
     playing = !!p;
     if (room) relayRun(playing);
     // Al acabar la partida, la sala se vuelve a comprobar (los que se fueron, fuera).
-    if (!playing && room) { if (room.lost) room.tries = 0; emit('room'); }
+    if (!playing && room) emit('room');
   }
 
   async function stop(why) {
@@ -331,7 +331,7 @@ G.Social = (() => {
       // El anfitrión siempre primero; el resto en el orden del servidor (el de llegada).
       .sort((a, b) => (a.uid === host ? -1 : b.uid === host ? 1 : 0));
     // run: lo último que pidió el anfitrión (start / end); sólo lo cambia relayRun.
-    return Object.assign(r || { lost: false, run: s.state === 'playing' }, {
+    return Object.assign(r || { run: s.state === 'playing' }, {
       id: codeKey(s.code) || (r && r.id) || host, code: Array.isArray(s.code) ? s.code.slice() : r ? r.code : null,
       mode: s.mode === 'server' ? 'server' : 'direct', state: s.state,
       directWaitMs: s.directWaitMs, host, isHost: host === uid, members, open: s.state !== 'playing'
@@ -341,6 +341,7 @@ G.Social = (() => {
   let hooked = false, creating = null;
   let relayGen = 0;                 // sube al salir: una respuesta de create / join de antes ya no vale
   let leftId = '';                  // la última sala de la que saliste (no se vuelve a ella sola)
+  let joining = 0;                  // join en camino: su foto llega antes que la respuesta (no es una recarga)
   function hookRelay() {
     if (hooked || !G.Relay) return;
     hooked = true;
@@ -366,7 +367,7 @@ G.Social = (() => {
    * se perdió al recargar) para que la sala vuelva a admitir gente.
    */
   function adopt(s) {
-    if (room || creating || !started || !s || !uid) return;
+    if (room || creating || joining || !started || !s || !uid) return;
     const k = codeKey(s.code);
     if (!k || k === leftId || !(s.members || []).some(m => m && m.uid === uid)) return;
     room = fromSnap(s, null);
@@ -422,11 +423,13 @@ G.Social = (() => {
     hookRelay();
     const gen = relayGen;
     let a;
+    joining++;
     try {
       await G.Relay.connect();
       leftId = '';
       a = await G.Relay.request('join', { code, hideIp: hideIp() });
     } catch (e) { return failed(e); }
+    finally { joining--; }
     if (gen !== relayGen || room) {           // saliste mientras tanto: fuera también en el servidor
       if (!room) G.Relay.request('leave', {}).catch(() => {});
       return failed(codeErr('left'));

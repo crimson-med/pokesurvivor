@@ -316,8 +316,8 @@
 
   G.LobbyUI = (() => {
     let membersKey = '', hintKey = '', codeKey = '';
-    // El botón Invitar de la sala abre la lista de amigos: llega con ellos (paso 6).
-    const INVITE = false;
+    // Invitar: con los amigos (los de Firebase hasta el paso 6, como en Amigos).
+    const INVITE = () => !!G.DB.fb;
 
     function init() {
       $('lobby-leave').onclick = async () => {
@@ -335,8 +335,8 @@
           G.Net.open(room.id, room.isHost, room.host);
           G.Net.setLanIp(room.isHost ? room.lanIp || null : null);
           // En partida la lista de la sala no echa a nadie (puede faltar alguien un
-          // momento por un corte con la base de datos): manda el canal directo.
-          if (!G.Coop.active && !room.lost) G.Net.syncMembers(room.members.map(m => m.uid));
+          // momento por un corte): manda la conexión de cada uno.
+          if (!G.Coop.active) G.Net.syncMembers(room.members.map(m => m.uid));
         } else if (G.Net.open_) G.Net.close();
         if (what === 'room-closed') {
           G.UI.toast('La sala se ha cerrado', 2600);
@@ -401,7 +401,7 @@
       renderLocal(room, ms);
 
       // Invitar (sólo el anfitrión y si queda sitio).
-      const canInvite = INVITE && room.isHost && ms.length < G.Social.MAX_PLAYERS;
+      const canInvite = INVITE() && room.isHost && ms.length < G.Social.MAX_PLAYERS;
       $('lobby-inv-title').classList.toggle('hidden', !canInvite);
       const inv = $('lobby-invite');
       inv.classList.toggle('hidden', !canInvite);
