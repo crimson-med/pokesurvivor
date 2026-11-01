@@ -18,7 +18,8 @@
  *   invitado -> anfitrión  { k:'f', p:[estado], ev:[eventos], h, w }   (h, w: ver flushClient)
  *   anfitrión -> invitado  { k:'f', t, lv, xp, xn, ki, bo, co, p:{uid:[estado]},
  *                            e:[[id,x,y,vida,anim,dir,estados]], ev:[eventos],
- *                            ja:[x,y,anim,dir,daño] (Arceus, sólo en la Sentencia) }
+ *                            ja:[x,y,anim,dir,daño] (Arceus, sólo en la Sentencia),
+ *                            ar:[grieta,fase] (ver Rift.netState) }
  *   anfitrión -> todos     { k:'start', seed, host, members:[{uid,name,dex,shiny}] }
  */
 G.Coop = (() => {
@@ -244,10 +245,21 @@ G.Coop = (() => {
     // Siempre: quién está eligiendo y, si hay cartas de nivel, cuáles (ver arriba).
     f.ho = holdNames();
     if (waiting.size) f.lu = [levelSeq, levelNow];
+    // Siempre: en qué grieta va y cómo acabó (ver Rift.netApply).
+    f.ar = G.Rift.netState();
     return f;
   }
 
-  function flushAll() { for (const m of mates.values()) if (m.connected && !G.Net.busy(m.uid)) G.Net.send(m.uid, hostFrame(m)); }
+  /*
+   * ¿Se le puede mandar ya? Con la conexión atascada o cortada se espera y los
+   * eventos siguen en la cola. Antes, con el canal cortado (un bache de la wifi,
+   * mientras se reconecta) el envío se tiraba sin avisar y con él los eventos: si
+   * era el fin de una grieta ('aw'/'al'), el invitado se quedaba en la arena para
+   * siempre (2-11-2026).
+   */
+  const canSend = u => G.Net.ready(u) && !G.Net.busy(u);
+
+  function flushAll() { for (const m of mates.values()) if (m.connected && canSend(m.uid)) G.Net.send(m.uid, hostFrame(m)); }
 
   /*
    * Cada mensaje del invitado lleva también si está eligiendo fusión u objeto (h)
@@ -259,10 +271,12 @@ G.Coop = (() => {
   let myHold = false;
   function flushClient(force) {
     if (!force && !outEv.length && flushT > 0) return;
-    // Con la conexión atascada se espera (los eventos siguen en outEv); el 'bye' sale igual.
-    if (force !== 'bye' && G.Net.busy(hostUid)) return;
-    G.Net.toHost({ k: 'f', p: myState(), ev: outEv, h: myHold ? 1 : 0, w: doneSeq });
-    outEv = [];
+    // Con la conexión atascada o cortada se espera (los eventos siguen en outEv); el 'bye' sale igual.
+    if (force !== 'bye' && !canSend(hostUid)) return;
+    // Tras una espera puede haber muchos: un mensaje enorme no saldría.
+    const ev = outEv.length > EV_MAX ? outEv.splice(0, EV_MAX) : outEv;
+    if (ev === outEv) outEv = [];
+    G.Net.toHost({ k: 'f', p: myState(), ev, h: myHold ? 1 : 0, w: doneSeq });
   }
 
   /** Cada fotograma (también en la pantalla de subida de nivel). */
@@ -289,7 +303,7 @@ G.Coop = (() => {
         // Si aún no ha salido lo de antes, mandar más sólo alarga la cola: se espera
         // (los eventos se guardan en m.q). Si dura, el invitado se pone en pausa
         // («esperando al anfitrión») en vez de ver la partida minutos tarde.
-        if (G.Net.busy(m.uid)) continue;
+        if (!canSend(m.uid)) continue;
         m.flushT = rateFor(m.uid);
         G.Net.send(m.uid, hostFrame(m));
       }
@@ -456,6 +470,7 @@ G.Coop = (() => {
     lastHostAt = performance.now();
     if (stalled) { stalled = false; updateAway(); }
     for (const ev of msg.ev || []) applyHostEvent(ev);
+    if (msg.ar) G.Rift.netApply(msg.ar);
     if (msg.ja) G.Judgment.netApply(msg.ja);
     // Quién elige y las cartas de nivel, aunque se haya perdido algún aviso.
     if (msg.ho) {

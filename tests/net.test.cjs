@@ -138,13 +138,14 @@ test('representative busy host payload saves at least 30%; all savings are lossl
 test('real Coop.tick frames pass through the codec without changing gameplay fields', () => {
   for (const host of [true, false]) {
     const sent = [], G = {};
-    G.Net = { uid: host ? 'host' : 'guest', on() {}, onPeer() {}, slow: () => false, busy: () => false,
+    G.Net = { uid: host ? 'host' : 'guest', on() {}, onPeer() {}, slow: () => false, busy: () => false, ready: () => true,
       send: (uid, f) => sent.push(f), toHost: f => sent.push(f) };
     G.Player = class { constructor() { this.maxHp = 300; } };
     G.DEX_BY = { 25: { dex: 25 } }; G.baseStartOf = () => 'thundershock';
     G.Sprites = { preload() {} }; G.U = { dist2: (x, y, a, b) => (x - a) ** 2 + (y - b) ** 2 };
     G.EnemyMgr = { all: () => [{ id: 123, x: 50, y: -10, hp: 125.1, anim: { cur: 'Walk', dir: 3 }, burn: 1 }] };
     G.Judgment = { netState: () => [12, -23, 1, 4] };
+    G.Rift = { netState: () => [2, 1] };
     new Function('G', 'document', source('js/net/coop.js'))(G, { addEventListener() {} });
     const local = { x: 0, y: 0, moveAngle: 1.234, walking: true, hp: 234, maxHp: 300,
       magnet: 78, aim: -1.43, xpMul: 1.2, reviveT: 0, activeGroup: () => [{ id: 'thundershock', lvl: 3 }] };
@@ -277,7 +278,7 @@ function coopWithCuts(host) {
   const timers = new Map(), lost = [], said = [], dropped = [];
   let mode = 'direct', nextT = 0;
   const G = {};
-  G.Net = { uid: host ? 'host' : 'guest', on(fn) { msgFn = fn; }, onPeer(fn) { peerFn = fn; }, slow: () => false, busy: () => false,
+  G.Net = { uid: host ? 'host' : 'guest', on(fn) { msgFn = fn; }, onPeer(fn) { peerFn = fn; }, slow: () => false, busy: () => false, ready: () => true,
     send() {}, toHost() {}, mode: () => mode };
   G.Player = class { constructor() { this.maxHp = 300; } };
   G.DEX_BY = { 25: { dex: 25 } }; G.baseStartOf = () => 'thundershock';
@@ -335,7 +336,7 @@ test('co-op cut mid-run: the host keeps the guest while it reconnects and remove
 test('co-op orbs: the host applies a guest orb only if the guest really has it, and buffs reach those nearby', () => {
   let msgFn = null;
   const G = {}, slept = [], slowed = [];
-  G.Net = { uid: 'host', on(fn) { msgFn = fn; }, onPeer() {}, slow: () => false, busy: () => false, send() {}, toHost() {}, mode: () => 'direct' };
+  G.Net = { uid: 'host', on(fn) { msgFn = fn; }, onPeer() {}, slow: () => false, busy: () => false, ready: () => true, send() {}, toHost() {}, mode: () => 'direct' };
   G.Player = class { constructor() { this.maxHp = 300; } };
   G.DEX_BY = { 25: { dex: 25 } }; G.baseStartOf = () => 'thundershock';
   G.Sprites = { preload() {} };
@@ -396,7 +397,7 @@ test('connection candidates travel together in one database message, and both fo
 function coopSums(host, mySum) {
   let msgFn = null; const got = {};
   const G = {};
-  G.Net = { uid: host ? 'host' : 'guest', on(fn) { msgFn = fn; }, onPeer() {}, slow: () => false, busy: () => false, send() {}, toHost() {}, mode: () => 'direct' };
+  G.Net = { uid: host ? 'host' : 'guest', on(fn) { msgFn = fn; }, onPeer() {}, slow: () => false, busy: () => false, ready: () => true, send() {}, toHost() {}, mode: () => 'direct' };
   G.Player = class { constructor() { this.maxHp = 300; } };
   G.DEX_BY = { 25: { dex: 25 }, 7: { dex: 7 } }; G.baseStartOf = () => 'thundershock';
   G.Moves = { BY_ID: { thundershock: {}, tackle: {} } }; G.Items = { BY: { leftovers: {} } };
@@ -430,7 +431,7 @@ test('co-op run summary: each player sees everyone, and what arrives is cleaned'
 test('co-op: a lost "I have picked" or "I am done choosing" message no longer freezes the run for everyone', () => {
   const calls = { resume: 0, hold: [] };
   const r = coopSums(true, null);
-  r.G.Judgment = { netState: () => null }; r.G.EnemyMgr = { all: () => [] };
+  r.G.Judgment = { netState: () => null }; r.G.Rift = { netState: () => [0, 0] }; r.G.EnemyMgr = { all: () => [] };
   const local = { x: 0, y: 0, moveAngle: 0, walking: false, hp: 300, maxHp: 300, magnet: 78, aim: 0, xpMul: 1, activeGroup: () => [] };
   r.G.Coop.begin({ host: 'host', members: [{ uid: 'host', name: 'Ana', dex: 25 }, { uid: 'guest', name: 'Bea', dex: 7 }] }, local,
     { levelStart() {}, waiting() {}, resume: () => calls.resume++, hold: names => calls.hold.push(names.join(',')), mateLeft() {}, lost() {},
@@ -455,12 +456,12 @@ test('co-op: a lost "I have picked" or "I am done choosing" message no longer fr
 function coopJam(host) {
   const sent = [], G = {};
   let jam = false;
-  G.Net = { uid: host ? 'host' : 'guest', on() {}, onPeer() {}, slow: () => false, busy: () => jam,
+  G.Net = { uid: host ? 'host' : 'guest', on() {}, onPeer() {}, slow: () => false, busy: () => jam, ready: () => true,
     send: (uid, f) => sent.push(f), toHost: f => sent.push(f) };
   G.Player = class { constructor() { this.maxHp = 300; } };
   G.DEX_BY = { 25: { dex: 25 } }; G.baseStartOf = () => 'thundershock';
   G.Sprites = { preload() {} }; G.U = { dist2: () => 0 };
-  G.EnemyMgr = { all: () => [] }; G.Judgment = { netState: () => null }; G.Ranking = { mySeal: () => null };
+  G.EnemyMgr = { all: () => [] }; G.Judgment = { netState: () => null }; G.Rift = { netState: () => [0, 0] }; G.Ranking = { mySeal: () => null };
   G.Social = { me: { name: 'yo' } };
   new Function('G', 'document', source('js/net/coop.js'))(G, { addEventListener() {} });
   const local = { x: 0, y: 0, moveAngle: 0, walking: false, hp: 300, maxHp: 300, magnet: 78, aim: 0, xpMul: 1, activeGroup: () => [] };

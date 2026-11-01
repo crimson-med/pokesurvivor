@@ -390,6 +390,8 @@ G.Net = (() => {
     slow(u) { const p = peers.get(u); return !p || p.mode !== 'direct'; },
     /** ¿Le queda mucho por salir? Entonces mejor esperar que mandar más (ver BUSY_BYTES). */
     busy(u) { const p = peers.get(u); return !!(p && p.dc && p.dc.readyState === 'open' && p.dc.bufferedAmount > BUSY_BYTES); },
+    /** ¿Saldría ahora lo que se mande? Sin canal abierto (y sin relé), send() lo tira. */
+    ready(u) { const p = peers.get(u); return ALLOW_RELAY || !!(p && p.dc && p.dc.readyState === 'open'); },
     peers() { return [...peers.keys()]; },
     get open_() { return !!roomId; },
     get isHost() { return isHost; },

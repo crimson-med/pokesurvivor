@@ -6,6 +6,10 @@
  * Cada línea en español y en inglés.
  */
 G.CHANGELOG = [
+  { d: '2026-11-02', title: ["Cooperativo: vuelta de las grietas", "Co-op: coming back from rifts"], fix: [
+    ["Cooperativo: al acabar la pelea de una grieta, a veces un invitado se quedaba en la arena mientras los demás ya habían vuelto al mapa (pasaba si su conexión se cortaba un momento justo entonces). Ahora vuelve con los demás, y lo que se manda durante un corte ya no se pierde: sale al volver la conexión.",
+     "Co-op: when a rift fight ended, a guest sometimes stayed in the arena while everyone else was already back on the map (it happened if their connection dropped for a moment right then). Now they come back with everyone else, and what is sent during a drop is no longer lost: it goes out when the connection is back."]
+  ]},
   { d: '2026-10-27', title: ["Cooperativo más estable", "Steadier co-op"], new: [
     ["Móvil y tableta: nuevo joystick «Anclado» (Ajustes → Controles → Colocar los botones). Aparece donde pones el dedo y se queda en ese sitio mientras lo mantienes, aunque alejes el dedo; al levantarlo y tocar en otro sitio, aparece allí. El «Flotante» de siempre sigue al dedo y sigue siendo el que viene puesto.",
      "Mobile and tablet: new \"Anchored\" joystick (Settings → Controls → Place the buttons). It appears where you put your finger and stays in that spot while you hold it, even if you move your finger away; lift it and touch somewhere else, and it appears there. The usual \"Floating\" one follows your finger and is still the default."]
