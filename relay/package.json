@@ -1,0 +1,22 @@
+{
+  "name": "pokesurvivor-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Servidor del cooperativo de PokeSurvivor: salas, códigos y reenvío de mensajes",
+  "type": "commonjs",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "jose": "5.10.0",
+    "socket.io": "4.7.5"
+  },
+  "devDependencies": {
+    "socket.io-client": "4.7.5"
+  }
+}

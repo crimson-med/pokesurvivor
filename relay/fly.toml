@@ -1,0 +1,30 @@
+# ============ fly.toml: el servidor del cooperativo en Fly.io ============
+# Una sola copia SIEMPRE (las salas viven en memoria): fly scale count 1.
+# Desplegar desde la raíz del repositorio:
+#   fly deploy . --config relay/fly.toml --dockerfile relay/Dockerfile
+app = "pokesurvivor-relay"
+primary_region = "cdg"
+
+[env]
+  PORT = "8080"
+  FIREBASE_PROJECT = "pokesurvivor-free"
+  ORIGINS = "https://pokesurvivor.com,https://www.pokesurvivor.com"
+  TRUST_PROXY = "1"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  path = "/healthz"
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "10s"
+  method = "GET"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
