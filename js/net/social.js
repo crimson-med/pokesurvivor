@@ -473,12 +473,24 @@ G.Social = (() => {
     if (room && me) G.Relay.emit('member', pokeInfo());
   }
 
-  /** Anfitrión: empieza (on) o acaba la partida en el servidor, una sola vez por cambio. */
+  /*
+   * Anfitrión: empieza (on) o acaba la partida en el servidor, una sola vez por cambio.
+   * El ack de 'start' trae la partida del ranking que abre el servidor (run, o null si
+   * estás solo): va a G.Ranking (setCoopRun) y queda en runId para cuando se suba.
+   */
+  let runId = null;
   function relayRun(on) {
     if (!room || !room.isHost || room.run === on) return;
     room.run = on;
     room.open = !on;
-    G.Relay.request(on ? 'start' : 'end', {}).catch(e => console.warn('[Social] ' + (on ? 'start' : 'end') + ':', e.code || e.message));
+    if (on) setRun(null);                      // (la de la partida de antes ya no vale)
+    G.Relay.request(on ? 'start' : 'end', {}).then(a => {
+      if (on) setRun(a && typeof a.run === 'string' && a.run ? a.run : null);
+    }, e => console.warn('[Social] ' + (on ? 'start' : 'end') + ':', e.code || e.message));
+  }
+  function setRun(run) {
+    runId = run;
+    if (G.Ranking && G.Ranking.setCoopRun) G.Ranking.setCoopRun(run);
   }
 
   // ---------------- misma wifi ----------------
@@ -646,6 +658,8 @@ G.Social = (() => {
     get invites() { return [...invites.values()]; },
     get room() { return room; },
     get uid() { return uid; },
+    /** Anfitrión: la partida en grupo del ranking de esta sala (del ack de 'start'), o null. */
+    get runId() { return runId; },
     /** La hora real (corrige el reloj del aparato si va desfasado). */
     now,
     VALID, MAX_PLAYERS

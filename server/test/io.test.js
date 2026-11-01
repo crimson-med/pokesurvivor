@@ -121,6 +121,12 @@ test('una cuenta bloqueada no entra: banned', async () => {
     assert.equal(err.message, 'banned');
   } finally { banned.delete('ban1'); }
   await connected(client('ban1'));
+  // users.banned en la base de datos (lo que pone /api/admin/ban).
+  const cookie = cookieFor('ban2');
+  srv.store.prep('UPDATE users SET banned = 1 WHERE uid = ?').run('ban2');
+  assert.equal((await connected(client('ban2', { cookie })).catch(e => e)).message, 'banned');
+  srv.store.prep('UPDATE users SET banned = 0 WHERE uid = ?').run('ban2');
+  await connected(client('ban2', { cookie }));
 });
 
 test('con la cookie de una sesión entra; sin ella, con otra o con una inventada: signed-out', async () => {

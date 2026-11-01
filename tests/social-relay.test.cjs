@@ -19,7 +19,7 @@ function server(opts = {}) {
   const rooms = new Map();          // 'a-b-c-d' -> { code, state, mode, host, members }
   const clients = new Map();        // uid -> relay falso
   let n = 0;
-  const srv = { rooms, clients, down: false, sameNet: false, rate: false, busy: false };
+  const srv = { rooms, clients, down: false, sameNet: false, rate: false, busy: false, runs: 0 };
   const key = c => c.join('-');
   const roomOf = u => [...rooms.values()].find(r => r.members.some(m => m.uid === u));
   const snap = r => clone({ code: r.code, state: r.state, mode: r.mode, host: r.host, directWaitMs: 6000, members: r.members });
@@ -58,7 +58,11 @@ function server(opts = {}) {
     }
     if (ev === 'member') { Object.assign(r.members.find(m => m.uid === u), p); setImmediate(() => push(r)); return; }
     if (r.host !== u) return { ok: false, err: 'not-host' };
-    if (ev === 'start' || ev === 'end') { r.state = ev === 'start' ? 'playing' : 'lobby'; setImmediate(() => push(r)); return { ok: true }; }
+    if (ev === 'start' || ev === 'end') {
+      r.state = ev === 'start' ? 'playing' : 'lobby'; setImmediate(() => push(r));
+      // Como io.js: el start abre la partida en grupo del ranking (null si el anfitrión está solo).
+      return ev === 'start' ? { ok: true, run: r.members.length > 1 ? 'run-' + (++srv.runs) : null } : { ok: true };
+    }
     if (ev === 'kick') {
       r.members = r.members.filter(m => m.uid !== p.uid);
       if (clients.has(p.uid)) clients.get(p.uid).fire('closed', 'kicked');
@@ -574,4 +578,20 @@ test('invite and setLocal return the error when the room cannot be created', asy
   assert.equal(l.ok, false);
   assert.equal(l.code, 'signed-out');
   assert.equal(p.S.room, null);
+});
+
+test('start: the run the server opens for the rankings goes to G.Ranking.setCoopRun and stays in runId', async () => {
+  const { host, guest } = await pair();
+  const runs = [];
+  host.G.Ranking = { setCoopRun: r => runs.push(r) };
+  await host.S.createRoom();
+  await guest.S.joinRoom(host.S.room.code);
+  host.S.setOpen(false); host.S.setPlaying(true); await settle();
+  assert.deepEqual(runs, [null, 'run-1'], 'cleared at start, then the one from the ack');
+  assert.equal(host.S.runId, 'run-1');
+  host.S.setPlaying(false); await settle();
+  assert.equal(host.S.runId, 'run-1', 'kept after the end, for the upload');
+  host.S.setOpen(false); host.S.setPlaying(true); await settle();
+  assert.deepEqual(runs, [null, 'run-1', null, 'run-2']);
+  assert.equal(guest.S.runId, null, 'only the host gets one');
 });

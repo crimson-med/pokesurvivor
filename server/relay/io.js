@@ -12,6 +12,8 @@
  *                   (guard.fromCookie, la sesión ps_sid de http/guard.js)
  *   deps.rank       (opcional) rankings: openCoopRun(sala) -> run o null, al
  *                   empezar el anfitrión una partida (start)
+ *   deps.db         (opcional) la base de datos: para no dejar entrar a una
+ *                   cuenta baneada (users.banned)
  *   deps.rooms, deps.limits, deps.sweepMs   para las pruebas
  *
  * Entrada: auth { v: 2, dex, shiny, ep } y la cookie de la sesión, que el
@@ -86,6 +88,12 @@ function attach(httpServer, deps = {}) {
   const rooms = deps.rooms || createRooms({ maxRooms: c.maxRooms, directWaitMs: c.directWaitMs, words: words.load(c.staticDir) });
   const limits = deps.limits || createLimits();
   const sessionOf = deps.sessionOf || (() => null);
+  const bannedQ = deps.db ? deps.db.prep('SELECT banned FROM users WHERE uid = ?') : null;
+  const isBanned = who => {
+    if (who.banned) return true;
+    const row = bannedQ && bannedQ.get(who.uid);
+    return !!(row && row.banned);
+  };
   const sockets = new Map();        // uid -> socket actual
   const closedAway = new Map();     // uid -> { why, at }: perdió la sala mientras estaba caído
   let relayed = 0;                  // bytes reenviados (sig + m)
@@ -175,7 +183,9 @@ function attach(httpServer, deps = {}) {
     let who = null;
     try { who = sessionOf(socket.request.headers.cookie); } catch (e) { console.error('[io] sesión: ' + e.message); }
     if (!who) return next(new Error('signed-out'));
-    if (who.banned) return next(new Error('banned'));
+    let banned = false;
+    try { banned = isBanned(who); } catch (e) { console.error('[io] banned: ' + e.message); }
+    if (banned) return next(new Error('banned'));
     if (sockets.size >= c.maxSockets && !sockets.has(who.uid)) return next(new Error('busy'));
     socket.data.uid = who.uid;
     socket.data.session = who.hash;
