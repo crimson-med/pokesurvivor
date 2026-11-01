@@ -10,6 +10,7 @@
  *   m      120 por segundo (y si se pasa 3 s seguidos, se le corta)
  *   sig    60 por minuto
  *   join   5 por minuto, por IP y por cuenta
+ *   invite 10 por minuto y cuenta
  * Extras del servidor: create 10 por minuto y cuenta, y 30 eventos de control
  * (member, path, start...) cada 10 s.
  */
@@ -77,6 +78,7 @@ const DEFAULTS = {
   joinIp: [5, 60000],
   joinUid: [5, 60000],
   create: [10, 60000],
+  invite: [10, 60000],
   ctl: [30, 10000],
 };
 

@@ -9,7 +9,8 @@
  *                             de cada Pokémon), y sus reportes
  *   POST /api/admin/ban       { uids: [...] } { removed }: users.banned, el correo
  *                             en bans y fuera sus marcas de las tablas de ahora
- *                             (periodos de ahora e histórico), con sus reportes
+ *                             (periodos de ahora e histórico), con sus reportes; y se le
+ *                             cierran los sockets abiertos (relay.kick)
  *   POST /api/admin/unban     { uid }         204
  *   GET  /api/admin/bans      { bans: [{ uid, name, coins, t1, t10, owned }] }
  *   POST /api/admin/dismiss   { board, id }   204: borra los reportes de esa marca
@@ -27,7 +28,7 @@ const UID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const ID_MAX = 200;
 
 function register(app, deps) {
-  const { cfg, db, guard } = deps;
+  const { cfg, db, guard, relay } = deps;
   const now = deps.now || Date.now;
   const b = guard.body();
   const admin = [guard.needSession, guard.needAdmin];
@@ -115,6 +116,8 @@ function register(app, deps) {
         for (const e of q.entriesOf.all(uid)) if (isCurrent(e.board)) removed += drop(e.board, e.id);
       }
     })();
+    // Fuera también del cooperativo: el socket ya no le deja volver a entrar (banned).
+    if (relay && relay.kick) for (const uid of uids) relay.kick(uid);
     res.json({ removed });
   });
 

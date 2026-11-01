@@ -24,7 +24,8 @@
  * API:  enabled · state ('off'|'connecting'|'online'|'offline') · uid · room · ep
  *       connect() · request(ev, payload) · emit(ev, ...args)
  *       on(ev, fn) · off(ev, fn) · disconnect()
- *   Eventos: 'room', 'sig', 'm', 'ack', 'peer', 'closed', 'invite', 'presence'
+ *   Eventos: 'room', 'sig', 'm', 'ack', 'peer', 'closed', 'invite', 'invite-answer',
+ *   'presence', 'friends'
  *   (del servidor) y 'state' (fn(estado), o fn('offline', código) cuando se
  *   cierra del todo por un error).
  *   room es la última sala recibida: se borra con 'closed' o disconnect().
@@ -32,7 +33,7 @@
 G.Relay = (() => {
   const V = 2;                       // versión del protocolo (auth.v)
   const ACK_MS = 8000;               // espera máxima de la respuesta de request()
-  const SERVER_EVENTS = ['room', 'sig', 'm', 'ack', 'peer', 'closed', 'invite', 'presence'];
+  const SERVER_EVENTS = ['room', 'sig', 'm', 'ack', 'peer', 'closed', 'invite', 'invite-answer', 'presence', 'friends'];
   const CODES = ['old-version', 'signed-out', 'banned', 'busy'];   // rechazos del servidor al conectar
 
   // Esta carga de la página: cambia al recargar, no al reconectar.

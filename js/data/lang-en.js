@@ -1178,4 +1178,9 @@ G.I18n.add({
   "Esta cuenta no puede jugar en grupo.": "This account can't play together.",
   "Añade un correo para salir en el ranking.": "Add an email to appear in the rankings.",
   "No se pudo enviar el reporte. Vuelve a probar en un momento.": "Couldn't send the report. Try again in a moment.",
+  "Añade un correo para tener amigos.": "Add an email to have friends.",
+  "Ir a Ajustes": "Go to Settings",
+  "Ese amigo no está conectado ahora mismo.": "That friend isn't online right now.",
+  "Uno de los dos ya tiene 200 amigos, el máximo.": "One of you already has 200 friends, the maximum.",
+  "Tienes 50 solicitudes sin contestar. Espera a que te respondan.": "You have 50 unanswered requests. Wait for them to reply.",
 });

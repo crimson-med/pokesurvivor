@@ -24,7 +24,7 @@
  *                      (en desarrollo, también localhost con otro puerto, como
  *                      el socket); si no, 403 csrf
  *   limit(nombre, clave(req))  middleware con uno de los topes de `limits`
- *                      (codeEmail, codeIp, guestIp, api); pasado: 429 rate con
+ *                      (codeEmail, codeIp, guestIp, api, profile); pasado: 429 rate con
  *                      Retry-After
  *   startSession(req, res, uid)   sesión nueva y su cookie
  *   endSession(res, hash)         borra una sesión y la cookie (dropSession, sólo la sesión)
@@ -55,6 +55,7 @@ const LIMITS = {
   codeIp: [10, 3600 * 1000],        // códigos por IP
   guestIp: [10, 3600 * 1000],       // invitados nuevos por IP
   api: [120, 60 * 1000],            // peticiones por sesión
+  profile: [1, 60 * 1000],          // PUT /api/profile por cuenta
 };
 
 function fail(res, status, code, extra) {

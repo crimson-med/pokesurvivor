@@ -59,8 +59,8 @@ the two copies and writes again with the new `rev`.
 | `PUT /api/profile` | `{ profile }` | `204`. The shape `social.js` `profileData()` builds today. At most once a minute. |
 | `GET /api/profile/:uid` | | `{ profile }` |
 | `GET /api/friends` | | `[{ uid, name, status: 'ok' \| 'in' \| 'out', online }]` |
-| `POST /api/friends` | `{ name }` | `204`. Sends a request. `needs-email` for guests. |
-| `POST /api/friends/:uid/accept` | `{}` | `204` |
+| `POST /api/friends` | `{ name }` | `204`. Sends a request (or accepts theirs if they asked first). `needs-email` for guests, `not-found`, `invalid` (yourself), `conflict` (already friends or asked), `too-many` (50 pending), `full` (200 friends). |
+| `POST /api/friends/:uid/accept` | `{}` | `204`. `not-found`, `full` (either side has 200). |
 | `DELETE /api/friends/:uid` | `{}` | `204`. Removes a friend or a request. |
 
 ## Rankings
@@ -125,7 +125,8 @@ and invites are instant.
 | `invite-answer` | `{ from, accept }` | `{ ok, code }` | Invited friend |
 
 `join` errors: `not-found`, `full`, `started`, `rate`. `invite` errors:
-`not-friend`, `offline`, `rate`.
+`not-friend`, `offline`, `rate`, `not-in-room`, `not-host`, `full`, `started`.
+`invite-answer` errors: `expired`, `not-found` (the room is gone).
 
 ### Server to client
 
@@ -138,10 +139,12 @@ and invites are instant.
 | `peer` | `(uid, 'online' \| 'away' \| 'gone')` | A member drops, returns, or their slot expires |
 | `closed` | `(why)` | `host-left`, `idle`, `kicked`, `server-restart` |
 | `invite` | `{ from, name, dex, shiny, code }` | A friend invites you. Expires after 3 minutes. |
+| `invite-answer` | `(uid, accept)` | To the host: the invited friend answered |
 | `presence` | `(uid, online)` | A friend comes online or leaves |
+| `friends` | `()` | Your friends list changed (a request, an accept or a removal): fetch `GET /api/friends` again |
 
-`from` is always set by the server. `room`, `peer` and `closed` may carry a
-trailing socket.io recovery offset: read arguments by position.
+`from` is always set by the server. Every event may carry a trailing socket.io
+recovery offset: read arguments by position.
 
 ### Sequence numbers, acks, flow control
 
