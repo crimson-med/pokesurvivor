@@ -1,6 +1,5 @@
-// Salas en el servidor del juego: js/net/social.js de verdad, con un G.Relay falso
-// unido a un servidor en memoria (docs/relay-coop/02-protocol.md) y un Firestore
-// falso para los amigos e invitaciones de antes (hasta el paso 6).
+// js/net/social.js de verdad, con un G.Relay y un G.Api falsos unidos a un servidor
+// en memoria (docs/relay-coop/02-protocol.md): salas, amigos, en línea e invitaciones.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -19,7 +18,19 @@ function server(opts = {}) {
   const rooms = new Map();          // 'a-b-c-d' -> { code, state, mode, host, members }
   const clients = new Map();        // uid -> relay falso
   let n = 0;
-  const srv = { rooms, clients, down: false, sameNet: false, rate: false, busy: false, runs: 0 };
+  const srv = { rooms, clients, down: false, sameNet: false, rate: false, busy: false, runs: 0,
+    users: new Map(),               // uid -> { name, kind }
+    links: new Map(),               // 'a|b' (a < b) -> { from, status: 'pending' | 'ok' }
+    invites: new Map(),             // to + '|' + from -> { code }
+    profiles: new Map() };
+  const pk = (x, y) => (x < y ? x + '|' + y : y + '|' + x);
+  srv.befriend = (x, y) => srv.links.set(pk(x, y), { from: x, status: 'ok' });
+  srv.listOf = u => [...srv.links].filter(([k]) => k.split('|').includes(u)).map(([k, l]) => {
+    const o = k.split('|').find(x => x !== u);
+    const status = l.status === 'ok' ? 'ok' : l.from === u ? 'out' : 'in';
+    return { uid: o, name: (srv.users.get(o) || {}).name || '???', status, online: status === 'ok' && clients.has(o) };
+  });
+  srv.tell = (u, ev, ...a) => { if (clients.has(u)) clients.get(u).fire(ev, ...a); };
   const key = c => c.join('-');
   const roomOf = u => [...rooms.values()].find(r => r.members.some(m => m.uid === u));
   const snap = r => clone({ code: r.code, state: r.state, mode: r.mode, host: r.host, directWaitMs: 6000, members: r.members });
@@ -51,7 +62,24 @@ function server(opts = {}) {
       push(room);                      // (como io.js: la foto sale antes que la respuesta)
       return { ok: true, room: snap(room), sameNet: srv.sameNet };
     }
+    if (ev === 'invite-answer') {
+      const inv = srv.invites.get(u + '|' + p.from);
+      if (!inv) return { ok: false, err: 'expired' };
+      srv.invites.delete(u + '|' + p.from);
+      srv.tell(p.from, 'invite-answer', u, p.accept === true);
+      return p.accept ? { ok: true, code: inv.code } : { ok: true };
+    }
     if (!r) return { ok: false, err: 'not-in-room' };
+    if (ev === 'invite') {
+      if (r.host !== u) return { ok: false, err: 'not-host' };
+      const l = srv.links.get(pk(u, p.to));
+      if (!l || l.status !== 'ok') return { ok: false, err: 'not-friend' };
+      if (!clients.has(p.to)) return { ok: false, err: 'offline' };
+      srv.invites.set(p.to + '|' + u, { code: r.code });
+      const me = clients.get(u).info;
+      srv.tell(p.to, 'invite', { from: u, name: me.name, dex: me.dex, shiny: !!me.shiny, code: r.code });
+      return { ok: true };
+    }
     if (ev === 'leave') {
       if (r.host === u) close(r, 'host-left', u);
       else { r.members = r.members.filter(m => m.uid !== u); setImmediate(() => push(r)); }
@@ -103,65 +131,85 @@ function fakeRelay(srv, uid, info, connectErr) {
   return R;
 }
 
-// ---------------- Firestore y Realtime Database falsos ----------------
-function fakeFs() {
-  const cols = new Map(), subs = [];
-  const col = n => { if (!cols.has(n)) cols.set(n, new Map()); return cols.get(n); };
-  const docOf = (n, id, d) => ({ id, data: () => clone(d), ref: docRef(n, id) });
-  const snapOf = (s, changes) => ({
-    docChanges: () => changes,
-    forEach: fn => { for (const [id, d] of col(s.n)) if (s.match(d)) fn(docOf(s.n, id, d)); }
-  });
-  function notify(n, id, type, d) {
-    for (const s of subs) if (s.n === n && s.match(d)) setImmediate(() => s.cb(snapOf(s, [{ type, doc: docOf(n, id, d) }])));
-  }
-  function docRef(n, id) {
-    return {
-      id,
-      async get() { const d = col(n).get(id); return { exists: !!d, data: () => clone(d) }; },
-      async set(d) { const had = col(n).has(id); col(n).set(id, clone(d)); notify(n, id, had ? 'modified' : 'added', d); },
-      async update(p) { col(n).set(id, Object.assign(col(n).get(id) || {}, clone(p))); },
-      async delete() { const d = col(n).get(id); if (d) { col(n).delete(id); notify(n, id, 'removed', d); } }
-    };
-  }
-  function query(n, f, op, v) {
-    const match = d => !!d && (op === '==' ? d[f] === v : (d[f] || []).includes(v));
-    return {
-      onSnapshot(cb) {
-        const s = { n, match, cb };
-        subs.push(s);
-        const init = [...col(n)].filter(([, d]) => match(d)).map(([id, d]) => ({ type: 'added', doc: docOf(n, id, d) }));
-        setImmediate(() => cb(snapOf(s, init)));
-        return () => subs.splice(subs.indexOf(s), 1);
-      },
-      async get() { return { docs: [...col(n)].filter(([, d]) => match(d)).map(([id, d]) => docOf(n, id, d)) }; }
-    };
+// ---------------- G.Api falso (amigos, apodo y perfil) ----------------
+function fakeApi(srv, uid) {
+  const calls = [];
+  const fail = (code, status) => Object.assign(Error(code), { code, status });
+  const pk = (x, y) => (x < y ? x + '|' + y : y + '|' + x);
+  const byName = n => [...srv.users].find(([, x]) => x.name.toLowerCase() === String(n).toLowerCase());
+  async function call(method, path, body) {
+    calls.push([method, path, clone(body)]);
+    await new Promise(r => setImmediate(r));
+    const me = srv.users.get(uid);
+    let m;
+    if (method === 'PUT' && path === '/api/me/name') {
+      if (byName(body.name) && byName(body.name)[0] !== uid) throw fail('taken', 409);
+      me.name = body.name;
+      return { me: { uid, kind: me.kind, name: me.name } };
+    }
+    if (method === 'GET' && (m = /^\/api\/profile\/(.+)$/.exec(path))) {
+      const o = decodeURIComponent(m[1]), pr = srv.profiles.get(o);
+      if (!pr) throw fail('not-found', 404);
+      return { profile: Object.assign({}, pr, { name: srv.users.get(o).name }) };
+    }
+    if (me.kind !== 'email') throw fail('needs-email', 403);
+    if (method === 'PUT' && path === '/api/profile') { srv.profiles.set(uid, clone(body.profile)); return null; }
+    if (method === 'GET' && path === '/api/friends') return clone(srv.listOf(uid));
+    if (method === 'POST' && path === '/api/friends') {
+      const o = byName(body.name);
+      if (!o || o[1].kind !== 'email') throw fail('not-found', 404);
+      const l = srv.links.get(pk(uid, o[0]));
+      if (l && l.status === 'pending' && l.from === o[0]) l.status = 'ok';
+      else if (l) throw fail('conflict', 409);
+      else srv.links.set(pk(uid, o[0]), { from: uid, status: 'pending' });
+      srv.tell(o[0], 'friends');
+      return null;
+    }
+    if (method === 'POST' && (m = /^\/api\/friends\/(.+)\/accept$/.exec(path))) {
+      const o = decodeURIComponent(m[1]), l = srv.links.get(pk(uid, o));
+      if (!l || l.status !== 'pending' || l.from !== o) throw fail('not-found', 404);
+      l.status = 'ok';
+      srv.tell(o, 'friends');
+      return null;
+    }
+    if (method === 'DELETE' && (m = /^\/api\/friends\/(.+)$/.exec(path))) {
+      const o = decodeURIComponent(m[1]);
+      if (srv.links.delete(pk(uid, o))) srv.tell(o, 'friends');
+      return null;
+    }
+    throw fail('not-found', 404);
   }
   return {
-    cols, col,
-    collection: n => ({ doc: id => docRef(n, id), where: (f, op, v) => query(n, f, op, v) }),
-    runTransaction: async () => {}
+    calls,
+    get: p => call('GET', p), post: (p, b = {}) => call('POST', p, b),
+    put: (p, b = {}) => call('PUT', p, b), del: (p, b = {}) => call('DELETE', p, b),
+    sent: (method, p) => calls.filter(c => c[0] === method && (!p || c[1] === p))
   };
 }
 
 // ---------------- un jugador ----------------
 const NAMES = { pikachu: 25, onix: 95, mew: 151, eevee: 133, bulbasaur: 1, charmander: 4, squirtle: 7 };
+// o.kind: 'email' (por defecto) o 'guest'.
 function player(uid, name, o = {}) {
   const store = new Map(o.storage || []);
-  if (!store.has('ps.nick.' + uid)) store.set('ps.nick.' + uid, name);
   const settings = o.settings || {};
+  const srv = o.srv || server();
+  const kind = o.kind || 'email';
+  srv.users.set(uid, { name, kind });
   const G = {
     DB: {
-      online: true, user: name, nameAccount: false, save: { name, partner: o.dex || 25, partnerShiny: !!o.shiny },
-      me: { uid, name, kind: 'email' },
-      // Los amigos de antes (Firestore) siguen ahí hasta el paso 6; noFb: como hoy, sin Firebase.
-      fb: o.noFb ? null : { uid, fs: o.fs || fakeFs() },
-      setName() {}, ownsShiny: () => true, onLeave() {}
+      online: true, user: name, save: { name, partner: o.dex || 25, partnerShiny: !!o.shiny, stats: {}, profile: {} },
+      me: { uid, name, kind },
+      setName(n) { G.DB.save.name = n; G.DB.user = n; },
+      updateMe(m) { G.DB.me = m; },
+      ownsShiny: () => true, onLeave() {}
     },
+    AchDefs: { LIST: [] },
     Settings: { get: k => settings[k] },
     Net: { isLocalIp: ip => /^192\.168\./.test(ip) }
   };
-  G.Relay = fakeRelay(o.srv || server(), uid, { name, dex: o.dex || 25, shiny: !!o.shiny }, o.connectErr);
+  G.Relay = fakeRelay(srv, uid, { name, dex: o.dex || 25, shiny: !!o.shiny }, o.connectErr);
+  G.Api = fakeApi(srv, uid);
   if (!o.noRoomCode) {
     G.RoomCode = {
       parseCode: s => {
@@ -174,28 +222,30 @@ function player(uid, name, o = {}) {
     G, console: { warn() {}, log: console.log },
     localStorage: { getItem: k => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) },
     fetch: () => Promise.reject(Error('offline')),
-    firebase: { firestore: { FieldValue: { serverTimestamp: () => Date.now() } } },
     setTimeout, clearTimeout, setImmediate, Date, crypto: globalThis.crypto, TextEncoder, btoa
   };
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx);
   const S = G.Social, events = [];
   S.on(w => events.push(w));
-  return { G, S, R: G.Relay, events, store, settings };
+  return { G, S, R: G.Relay, A: G.Api, events, store, settings, srv };
 }
 
+// o.friends: ya son amigos antes de entrar.
 async function pair(o = {}) {
-  const srv = o.srv || server(), sharedFs = fakeFs();
-  const host = player('H1', 'Ash', Object.assign({ srv, fs: sharedFs }, o.host));
-  const guest = player('G1', 'Misty', Object.assign({ srv, fs: sharedFs, dex: 120 }, o.guest));
+  const srv = o.srv || server();
+  const host = player('H1', 'Ash', Object.assign({ srv }, o.host));
+  const guest = player('G1', 'Misty', Object.assign({ srv, dex: 120 }, o.guest));
+  if (o.friends) srv.befriend('H1', 'G1');
   await host.S.start(); await guest.S.start();
-  return { srv, host, guest, fs: sharedFs };
+  await settle();
+  return { srv, host, guest };
 }
 
 // ---------------- entrar en la cuenta ----------------
 
-test('start: without Firebase the nickname is the account name, and the socket opens right away', async () => {
-  const p = player('H1', 'Ash', { noFb: true });
+test('start: the nickname is the account name, the socket opens right away and the friends list loads', async () => {
+  const p = player('H1', 'Ash');
   assert.equal(await p.S.start(), 'ok');
   assert.deepEqual(clone(p.S.me), { uid: 'H1', name: 'Ash' });
   assert.equal(p.S.uid, 'H1');
@@ -204,10 +254,51 @@ test('start: without Firebase the nickname is the account name, and the socket o
   assert.equal(p.R.sent('connect').length, 1);
   await p.S.ensureFriends();
   assert.equal(p.S.friends.length, 0);
-  const off = player('H2', 'Brock', { noFb: true });
+  assert.equal(p.A.sent('GET', '/api/friends').length, 1, 'once, then from events');
+  const off = player('H2', 'Brock');
   off.G.DB.online = false;
   assert.equal(await off.S.start(), 'off');
   assert.deepEqual(off.R.calls, []);
+});
+
+test('start: an email account still called Guest and 4 digits must pick a nickname (claimNick)', async () => {
+  const srv = server();
+  player('X9', 'Taken', { srv });
+  const p = player('E1', 'Guest0042', { srv });
+  assert.equal(await p.S.start(), 'need-nick');
+  assert.equal(p.S.me, null);
+  assert.equal((await p.S.claimNick('ab')).ok, false);
+  assert.equal((await p.S.claimNick('Guest1234')).ok, false, 'default names are taken');
+  assert.deepEqual(p.A.sent('PUT', '/api/me/name'), [], 'checked here first');
+  const t = await p.S.claimNick('taken');
+  assert.equal(t.ok, false);
+  assert.equal(t.error, 'Ese apodo ya lo tiene otro jugador.');
+  assert.equal((await p.S.claimNick(' Brock ')).ok, true);
+  assert.deepEqual(clone(p.S.me), { uid: 'E1', name: 'Brock' });
+  assert.equal(p.G.DB.me.name, 'Brock');
+  assert.equal(p.G.DB.save.name, 'Brock');
+  assert.equal(await p.S.start(), 'ok');
+  // Un invitado juega con el nombre de serie y no tiene amigos.
+  const g = player('U1', 'Guest0007', { srv, kind: 'guest' });
+  assert.equal(await g.S.start(), 'ok');
+  assert.equal(g.S.canFriend, false);
+  await g.S.ensureFriends();
+  assert.deepEqual(g.A.calls, [], 'a guest never asks for friends');
+  assert.equal((await g.S.request('Brock')).error, 'Añade un correo para tener amigos.');
+});
+
+test('start again after a guest adds an email (same account): friends load and the nickname is asked', async () => {
+  const srv = server();
+  const p = player('U3', 'Guest0003', { srv, kind: 'guest' });
+  assert.equal(await p.S.start(), 'ok');
+  assert.equal(p.S.me.name, 'Guest0003');
+  srv.users.get('U3').kind = 'email';
+  p.G.DB.me = { uid: 'U3', name: 'Guest0003', kind: 'email' };
+  assert.equal(await p.S.start(), 'need-nick');
+  assert.equal(p.S.me, null);
+  assert.equal(p.A.sent('GET', '/api/friends').length, 1);
+  assert.equal((await p.S.claimNick('Gary')).ok, true);
+  assert.equal(await p.S.start(), 'ok');
 });
 
 test('stop (logout): leaves the room, then closes the socket', async () => {
@@ -501,36 +592,142 @@ test('same Wi-Fi: setLocal keeps the IP only here (nothing goes to the server), 
   assert.equal(guest.S.lanKey, undefined);
 });
 
+// ---------------- amigos ----------------
+
+test('friends: request by nickname, the other one gets it from the friends event, accepts, and both are friends', async () => {
+  const { host, guest } = await pair();
+  const r = await host.S.request('misty');
+  assert.equal(r.ok, true);
+  assert.equal(r.msg, 'Solicitud enviada a Misty');
+  assert.deepEqual(clone(host.S.friends), [{ uid: 'G1', name: 'Misty', status: 'out', online: false }]);
+  await settle();
+  assert.deepEqual(clone(guest.S.friends), [{ uid: 'H1', name: 'Ash', status: 'in', online: false }], 'reloaded on the friends event');
+  assert.equal((await host.S.request('Misty')).error, 'Ya le enviaste una solicitud.');
+  assert.equal((await host.S.request('ash')).error, 'Ese eres tú.');
+  const a = await guest.S.accept('H1');
+  assert.equal(a.msg, 'Ahora eres amigo de Ash');
+  await settle();
+  assert.equal(host.S.friends[0].status, 'ok');
+  assert.equal(host.S.friends[0].online, true, 'online comes with the list');
+  assert.equal((await host.S.request('Misty')).error, 'Ya sois amigos.');
+  assert.equal((await host.S.request('Nadie')).error, 'No hay ningún jugador con ese apodo.');
+  assert.equal((await guest.S.remove('H1')).ok, true);
+  await settle();
+  assert.equal(host.S.friends.length, 0);
+});
+
+test('friends: asking someone who already asked you accepts it', async () => {
+  const { host, guest } = await pair();
+  await host.S.request('Misty');
+  await settle();
+  const r = await guest.S.request('Ash');
+  assert.equal(r.ok, true);
+  assert.equal(r.msg, 'Ahora eres amigo de Ash');
+  assert.deepEqual(guest.A.sent('POST').map(c => c[1]), ['/api/friends/H1/accept']);
+});
+
+test('presence: the online dot follows the server, only for accepted friends', async () => {
+  const { host } = await pair({ friends: true });
+  const f = () => host.S.friends.find(x => x.uid === 'G1');
+  assert.equal(f().online, true);
+  host.R.fire('presence', 'G1', false); await settle();
+  assert.equal(f().online, false);
+  assert.equal(host.events.at(-1), 'friends');
+  host.R.fire('presence', 'G1', true); await settle();
+  assert.equal(f().online, true);
+  host.R.fire('presence', 'nobody', true); await settle();
+  assert.equal(host.S.friends.length, 1);
+});
+
 // ---------------- invitaciones ----------------
 
-test('invites carry the code, and acceptInvite joins by that code', async () => {
-  const { host, guest, fs: sharedFs } = await pair({ guest: { storage: [['ps.hasfr.G1', '1']] } });
-  sharedFs.col('friendships').set('G1_H1', { users: ['G1', 'H1'], from: 'H1', to: 'G1', status: 'ok', names: { H1: 'Ash', G1: 'Misty' } });
+test('invite: creates the room if needed, the friend gets the invite with the code, accepting joins by it', async () => {
+  const { srv, host, guest } = await pair({ friends: true });
   await host.S.ensureFriends();
   const r = await host.S.invite('G1');
   assert.equal(r.ok, true);
-  const doc = sharedFs.col('inv').get('G1_H1');
-  assert.deepEqual(doc.code, [25, 95, 151, 133]);
-  assert.equal(doc.room, '25-95-151-133', 'room stays for older clients');
+  assert.equal(r.msg, 'Invitación enviada a Misty');
+  assert.deepEqual(host.R.sent('invite'), [['invite', { to: 'G1' }]]);
   await settle();
-  assert.deepEqual(clone(guest.S.invites[0].code), [25, 95, 151, 133]);
-  assert.equal(guest.S.invites[0].room, '25-95-151-133');
+  assert.equal(guest.S.invites.length, 1);
+  const inv = guest.S.invites[0];
+  assert.equal(inv.from, 'H1');
+  assert.equal(inv.name, 'Ash');
+  assert.deepEqual(clone(inv.code), [25, 95, 151, 133]);
+  assert.equal(inv.room, '25-95-151-133');
+  assert.ok(guest.events.includes('invites'));
+  // Pulsar otra vez enseguida no manda nada.
+  assert.equal((await host.S.invite('G1')).ok, true);
+  assert.equal(host.R.sent('invite').length, 1);
   const a = await guest.S.acceptInvite('H1');
   assert.equal(a.ok, true);
+  assert.deepEqual(guest.R.sent('invite-answer'), [['invite-answer', { from: 'H1', accept: true }]]);
   assert.deepEqual(guest.R.sent('join'), [['join', { code: [25, 95, 151, 133], hideIp: false }]]);
   assert.equal(guest.S.room.id, host.S.room.id);
-  assert.equal(sharedFs.col('inv').has('G1_H1'), false, 'the invite is used up');
+  assert.equal(guest.S.invites.length, 0, 'the invite is used up');
+  assert.equal(srv.invites.size, 0);
 });
 
-test('an old invite (room id only, no code) fails cleanly', async () => {
-  const { guest, fs: sharedFs } = await pair({ guest: { storage: [['ps.hasfr.G1', '1']] } });
-  await sharedFs.collection('inv').doc('G1_H1').set({ to: 'G1', from: 'H1', room: 'H1', name: 'Ash', at: Date.now() });
+test('invite: refused by the server (offline, not a friend) comes back with the code; declining tells the host', async () => {
+  const { srv, host, guest } = await pair({ friends: true });
+  srv.clients.delete('G1');
+  const r = await host.S.invite('G1');
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'offline');
+  srv.clients.set('G1', guest.R);
+  srv.links.clear();
+  assert.equal((await host.S.invite('G1')).code, 'not-friend');
+  srv.befriend('H1', 'G1');
+  assert.equal((await host.S.invite('G1')).ok, true);
+  await settle();
+  const told = [];
+  host.R.on('invite-answer', (u, yes) => told.push([u, yes]));
+  guest.S.declineInvite('H1');
+  await settle();
+  assert.equal(guest.S.invites.length, 0);
+  assert.deepEqual(told, [['G1', false]]);
+  assert.equal(guest.S.room, null);
+});
+
+test('invite: one the server no longer has (expired) fails cleanly with no join; one with no code is ignored', async () => {
+  const { srv, guest } = await pair({ friends: true });
+  guest.R.fire('invite', { from: 'H1', name: 'Ash', dex: 25, shiny: false, code: [25, 95, 151, 133] });
   await settle();
   assert.equal(guest.S.invites.length, 1);
   const a = await guest.S.acceptInvite('H1');
   assert.equal(a.ok, false);
-  assert.equal(a.code, 'not-found');
+  assert.equal(a.error, 'La invitación ha caducado.');
   assert.deepEqual(guest.R.sent('join'), []);
+  guest.R.fire('invite', { from: 'H1', name: 'Ash', room: 'H1' });
+  await settle();
+  assert.equal(guest.S.invites.length, 0);
+  assert.equal(srv.invites.size, 0);
+});
+
+// ---------------- perfil ----------------
+
+test('profile: publishProfile goes to PUT /api/profile (email only), getProfile reads it cleaned', async () => {
+  const { host, guest } = await pair({ friends: true });
+  const U = {
+    str: (v, n) => (typeof v === 'string' ? v.slice(0, n) : ''), int: (v, m = 1e15) => Math.max(0, Math.min(m, Math.floor(+v) || 0)),
+    list: (v, n) => (Array.isArray(v) ? v.slice(0, n) : [])
+  };
+  host.G.U = guest.G.U = U;
+  host.G.DEX_BY = guest.G.DEX_BY = { 25: {} };
+  host.G.DB.save.profile = { title: 'Campeón', favs: [{ dex: 25, shiny: true }] };
+  host.S.publishProfile(true);
+  await new Promise(r => setTimeout(r, 900));
+  assert.equal(host.A.sent('PUT', '/api/profile').length, 1);
+  const p = await guest.S.getProfile('H1');
+  assert.equal(p.name, 'Ash');
+  assert.equal(p.title, 'Campeón');
+  assert.deepEqual(clone(p.favs), [{ dex: 25, shiny: true }]);
+  assert.equal(await guest.S.getProfile('nobody'), null);
+  const g = player('U2', 'Guest0001', { kind: 'guest' });
+  await g.S.start();
+  g.S.publishProfile(true);
+  await new Promise(r => setTimeout(r, 900));
+  assert.deepEqual(g.A.sent('PUT', '/api/profile'), [], 'guests have no public profile');
 });
 
 // ---------------- carreras y fallos ----------------
@@ -567,14 +764,15 @@ test('a late snapshot does not swallow the next start', async () => {
 });
 
 test('invite and setLocal return the error when the room cannot be created', async () => {
-  const sharedFs = fakeFs();
-  sharedFs.col('friendships').set('G1_H1', { users: ['G1', 'H1'], from: 'H1', to: 'G1', status: 'ok', names: { H1: 'Ash', G1: 'Misty' } });
-  const p = player('H1', 'Ash', { srv: server(), fs: sharedFs, connectErr: 'signed-out' });
+  const srv = server();
+  player('G1', 'Misty', { srv });
+  srv.befriend('H1', 'G1');
+  const p = player('H1', 'Ash', { srv, connectErr: 'signed-out' });
   await p.S.start(); await p.S.ensureFriends();
   const r = await p.S.invite('G1');
   assert.equal(r.ok, false);
   assert.equal(r.code, 'signed-out');
-  assert.equal(sharedFs.col('inv').size, 0);
+  assert.equal(srv.invites.size, 0);
   const l = await p.S.setLocal('192.168.1.20');
   assert.equal(l.ok, false);
   assert.equal(l.code, 'signed-out');

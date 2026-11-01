@@ -44,10 +44,9 @@
     return { init, open, get skipped() { return skipped; } };
   })();
 
-  /** Abre `fn` si tienes apodo; si no, pide el apodo primero. */
+  /** Abre `fn` si tienes apodo; si no, pide el apodo primero (start() lo vuelve a mirar). */
   function withNick(fn) {
     if (!needOnline()) return;
-    if (G.Social.me) { fn(); return; }
     G.Social.start().then(r => { if (r === 'ok') fn(); else G.NickUI.open(fn); });
   }
 
@@ -81,7 +80,13 @@
     banned: 'Esta cuenta no puede jugar en grupo.',
     busy: 'El juego en grupo está lleno ahora mismo. Prueba otra vez en unos minutos.',
     unreachable: NO_SERVER,
-    timeout: NO_SERVER
+    timeout: NO_SERVER,
+    // Invitaciones (invite e invite-answer).
+    'not-friend': 'Sólo puedes invitar a tus amigos.',
+    'not-host': 'Sólo el anfitrión de la sala puede invitar.',
+    'not-in-room': 'Esa sala ya no existe.',
+    offline: 'Ese amigo no está conectado ahora mismo.',
+    expired: 'La invitación ha caducado.'
   };
   /** Error del servidor (o respuesta { ok: false, err | error }) -> texto para el jugador. */
   function relayError(e, fallback) {
@@ -92,7 +97,7 @@
   }
 
   /** Texto de una respuesta { ok: false, code, error } de G.Social: el del código si lo hay. */
-  const errText = r => relayError(r, (r && r.error) || '');
+  const errText = r => relayError(r, r && typeof r.error === 'string' && r.error ? r.error : NO_SERVER);
 
   /** Llama a G.Social y deja la respuesta en { ok, error }, tanto si lanza como si devuelve ok: false. */
   async function relayCall(fn, fallback) {
@@ -164,6 +169,8 @@
         if (r.ok) $('fr-name').value = '';
       };
       $('fr-room').onclick = () => G.LobbyUI.open();
+      // Invitados: los amigos piden correo (se añade en Ajustes › Cuenta).
+      $('fr-guest-set').onclick = () => G.SettingsUI.open('acc');
       G.Social.on(() => { if (G.UI.isOpen('scr-friends')) render(); });
 
       // Crear sala (directa primero o siempre por el servidor) o entrar con código.
@@ -254,22 +261,26 @@
       });
     }
 
-    // (Sin "en línea" desde el 20-10-2026: costaba 1/4 de las escrituras de Firestore.)
+    // "En línea": lo dice el servidor (presence), sólo de los amigos aceptados.
     function stateText(f) {
       if (f.status === 'in') return 'Quiere ser tu amigo';
       if (f.status === 'out') return 'Solicitud enviada';
-      return '';
+      return f.online ? 'En línea' : 'Desconectado';
     }
 
     function render() {
       const room = G.Social.room;
       $('fr-code').classList.toggle('hidden', !!room);
-      // Los amigos todavía son los de Firebase (G.DB.fb): sin él, fuera hasta el paso 6.
-      $('fr-online').classList.toggle('hidden', !G.DB.fb);
-      $('fr-me').innerHTML = 'Tu apodo: <b class="gold" translate="no">' + esc(G.Social.me ? G.Social.me.name : '') + '</b> · dáselo a tus amigos para que te añadan.';
+      // Amigos sólo con correo: el invitado ve cómo añadirlo (y puede jugar con código).
+      const guest = !G.Social.canFriend;
+      $('fr-guest').classList.toggle('hidden', !guest);
+      $('fr-mine').classList.toggle('hidden', guest);
       $('fr-room').classList.toggle('hidden', !room);
+      if (guest) return;
+      $('fr-me').innerHTML = 'Tu apodo: <b class="gold" translate="no">' + esc(G.Social.me ? G.Social.me.name : '') + '</b> · dáselo a tus amigos para que te añadan.';
+      // Solicitudes, luego los amigos en línea, los desconectados y las enviadas.
       const list = G.Social.friends.sort((a, b) => {
-        const rank = f => f.status === 'in' ? 0 : f.status === 'ok' ? 1 : 2;
+        const rank = f => f.status === 'in' ? 0 : f.status === 'ok' ? (f.online ? 1 : 2) : 3;
         return rank(a) - rank(b) || a.name.localeCompare(b.name);
       });
       const box = $('fr-list');
@@ -281,7 +292,7 @@
       for (const f of list) {
         const el = document.createElement('div');
         el.className = 'fr-row';
-        const dot = f.status !== 'ok' ? 'pend' : 'on';
+        const dot = f.status !== 'ok' ? 'pend' : f.online ? 'on' : 'off';
         const inRoom = room && room.members.some(m => m.uid === f.uid);
         el.innerHTML = `<i class="dot ${dot}"></i><b translate="no"><a href="#" class="plink" title="Ver su perfil">${esc(f.name)}</a></b><span class="st">${inRoom ? 'En tu sala' : stateText(f)}</span><span class="grow"></span>`;
         if (f.status === 'ok') el.querySelector('.plink').onclick = e => { e.preventDefault(); G.ProfileUI.show(f.uid); };
@@ -296,7 +307,8 @@
         } else if (f.status === 'out') {
           btn('Cancelar', 'ghost', () => G.Social.remove(f.uid));
         } else {
-          if (!inRoom && (!room || room.isHost)) {
+          // Sólo a los que están en línea (el servidor no avisa a quien no lo está).
+          if (!inRoom && f.online && (!room || room.isHost)) {
             btn('Invitar', 'gold', async () => {
               const r = await G.Social.invite(f.uid);
               msg(r.ok ? r.msg : errText(r), !r.ok);
@@ -316,8 +328,8 @@
 
   G.LobbyUI = (() => {
     let membersKey = '', hintKey = '', codeKey = '';
-    // Invitar: con los amigos (los de Firebase hasta el paso 6, como en Amigos).
-    const INVITE = () => !!G.DB.fb;
+    // Invitar: a los amigos en línea (sólo con correo; los invitados comparten el código).
+    const INVITE = () => G.Social.canFriend;
 
     function init() {
       $('lobby-leave').onclick = async () => {
@@ -407,8 +419,11 @@
       inv.classList.toggle('hidden', !canInvite);
       if (canInvite) {
         inv.innerHTML = '';
-        const free = G.Social.friends.filter(f => f.status === 'ok' && !ms.some(m => m.uid === f.uid));
-        if (!free.length) inv.innerHTML = '<p class="sub" style="margin:0">Aún no tienes amigos añadidos.</p>';
+        const mine = G.Social.friends.filter(f => f.status === 'ok' && !ms.some(m => m.uid === f.uid));
+        const free = mine.filter(f => f.online).sort((a, b) => a.name.localeCompare(b.name));
+        if (!free.length) {
+          inv.innerHTML = '<p class="sub" style="margin:0">' + (mine.length ? 'Ningún amigo en línea ahora mismo.' : 'Aún no tienes amigos añadidos.') + '</p>';
+        }
         for (const f of free) {
           const el = document.createElement('div');
           el.className = 'fr-row';

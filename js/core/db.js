@@ -798,6 +798,12 @@ G.DB = (() => {
     commit();
   }
 
+  /** La cuenta tal como la devuelve el servidor tras un cambio (PUT /api/me/name). */
+  function updateMe(m) {
+    if (mode !== 'cloud' || !me || !m || m.uid !== me.uid) return;
+    me = m; write(K_ME, me);
+  }
+
   /**
    * Jugar sin correo. Con el servidor, una cuenta de invitado de verdad (se
    * guarda y luego se le puede poner un correo); sin él (modo local), una
@@ -961,7 +967,7 @@ G.DB = (() => {
   return {
     ready, sendCode, verifyCode, playAsGuest, logout, commit, deleteAccount, flush, saveNow,
     register, login,
-    owns, grant, ownsShiny, grantShiny, merge, setName, upgradesOf, isFav, setFav,
+    owns, grant, ownsShiny, grantShiny, merge, setName, updateMe, upgradesOf, isFav, setFav,
     importOld, declineImport,
     /** ¿Hay partidas de antes en este navegador que ofrecer a esta cuenta? (una vez) */
     get importable() { return importable(); },

@@ -5,7 +5,8 @@
  * (m). Nunca mira lo que llevan sig y m: sólo los reenvía, con el `from` de
  * quien manda. El protocolo está en docs/relay-coop/02-protocol.md.
  *
- * attach(httpServer, deps) -> { io, rooms, limits, stats(), shutdown(why), kick(uid, hash), close() }
+ * attach(httpServer, deps) -> { io, rooms, limits, stats(), shutdown(why), kick(uid, hash),
+ *                               online(uid), send(uid, ev, ...args), rename(uid, name), close() }
  *   deps.cfg        config.js (siteUrl, maxRooms, maxSockets, maxMsgBytes,
  *                   directWaitMs, trustProxy, dev)
  *   deps.sessionOf  cabecera Cookie -> { uid, name, kind, hash, banned? } o null
@@ -14,8 +15,9 @@
  *                   empezar el anfitrión una partida (start)
  *   deps.db         (opcional) la base de datos: para no dejar entrar a una
  *                   cuenta baneada (users.banned, o su correo en bans con
- *                   deps.rank.standing)
- *   deps.rooms, deps.limits, deps.sweepMs   para las pruebas
+ *                   deps.rank.standing), y los amigos (friendships) para
+ *                   'presence' e 'invite'
+ *   deps.rooms, deps.limits, deps.sweepMs, deps.now   para las pruebas
  *
  * Entrada: auth { v: 2, dex, shiny, ep } y la cookie de la sesión, que el
  * navegador manda en el handshake (mismo origen). Sin sesión válida:
@@ -23,7 +25,23 @@
  * texto al azar por carga de la página (ver rooms.js).
  * Las salas sólo se crean con código (create { mode }).
  * kick(uid, hash) cierra los sockets de una cuenta (con hash, sólo los de esa
- * sesión): al salir, salir de todas partes o borrar la cuenta.
+ * sesión): al salir, salir de todas partes, borrar la cuenta o banearla
+ * (http/admin.js).
+ *
+ * Amigos (paso 6, http/social.js guarda las amistades):
+ *   presence(uid, online)   a sus amigos conectados, al abrir su primer socket y
+ *                           al cerrarse el último (online(uid): ¿tiene socket?)
+ *   invite { to }           el anfitrión a un amigo conectado: le llega
+ *                           invite { from, name, dex, shiny, code }. Errores:
+ *                           not-friend, offline, rate (10 por minuto, y al mismo
+ *                           amigo y sala una vez cada 20 s), not-in-room, not-host,
+ *                           full, started. Dura 3 minutos (en memoria)
+ *   invite-answer { from, accept }   el invitado contesta: al anfitrión le llega
+ *                           invite-answer(uid, accept); ack { ok, code } (con
+ *                           accept) para entrar con join como siempre. expired si
+ *                           ya no está; not-found si la sala ya no existe
+ *   send(uid, 'friends')    lo usa social.js: la lista de amigos ha cambiado
+ *   rename(uid, name)       el apodo nuevo, para la sala y las invitaciones
  *
  * Nada de lo que llevan los mensajes va al registro; las IP sólo viven en
  * memoria (límites y "misma red"), nunca se mandan a nadie.
@@ -39,6 +57,9 @@ const { isLocalOrigin } = require('../config');
 const VERSION = 2;
 const VERSIONS = [VERSION, VERSION - 1].filter(v => v >= 1);   // la actual y la anterior
 const CLOSED_MEMORY_MS = 10 * 60 * 1000;
+const INVITE_MS = 3 * 60 * 1000;    // lo que dura una invitación
+const REINVITE_MS = 20 * 1000;      // al mismo amigo, una vez en este tiempo
+const MAX_PLAYERS = 4;
 
 const rk = room => 'r:' + room.key;
 
@@ -101,7 +122,20 @@ function attach(httpServer, deps = {}) {
   };
   const sockets = new Map();        // uid -> socket actual
   const closedAway = new Map();     // uid -> { why, at }: perdió la sala mientras estaba caído
+  const invites = new Map();        // to + ' ' + from -> { from, to, key, code, at }
+  const now = deps.now || Date.now;
   let relayed = 0;                  // bytes reenviados (sig + m)
+
+  // Amigos aceptados (friendships, a < b). Sin base de datos, ninguno.
+  const friendsQ = deps.db ? deps.db.prep(`SELECT CASE WHEN a = @uid THEN b ELSE a END AS uid FROM friendships
+                                           WHERE (a = @uid OR b = @uid) AND status = 'ok'`) : null;
+  const pairQ = deps.db ? deps.db.prep("SELECT 1 AS x FROM friendships WHERE a = ? AND b = ? AND status = 'ok'") : null;
+  const friendsOf = uid => (friendsQ ? friendsQ.all({ uid }).map(r => r.uid) : []);
+  const areFriends = (x, y) => !!(pairQ && pairQ.get(...(x < y ? [x, y] : [y, x])));
+  const nameOf = (uid, fallback) => {
+    const u = userQ && userQ.get(uid);
+    return (u && u.name) || fallback || '';
+  };
 
   const io = new Server(httpServer, {
     // Tope duro del transporte: el doble del máximo, para que un mensaje algo
@@ -201,11 +235,19 @@ function attach(httpServer, deps = {}) {
     next();
   });
 
+  // presence(uid, online) a los amigos de uid que tienen el socket abierto.
+  function presence(uid, on) {
+    let list = [];
+    try { list = friendsOf(uid); } catch (e) { console.error('[io] amigos: ' + e.message); }
+    for (const f of list) send(f, 'presence', uid, on);
+  }
+
   io.on('connection', socket => {
     const uid = socket.data.uid;
     const prev = sockets.get(uid);
     sockets.set(uid, socket);
     if (prev && prev !== socket) prev.disconnect(true);   // la misma cuenta en otra pestaña
+    else if (!prev) presence(uid, true);
 
     const room = rooms.roomOf(uid);
     // Una conexión recuperada vuelve con sus salas de socket.io: fuera las
@@ -356,10 +398,50 @@ function attach(httpServer, deps = {}) {
       if (t) forward(t.member, 'ack', uid, seq);
     });
 
+    // ---------- Invitaciones a la sala (sólo a amigos conectados) ----------
+    socket.on('invite', (p0, cb0) => {
+      const [p, cb] = args(p0, cb0);
+      if (!ctl(cb)) return;
+      const to = typeof p.to === 'string' ? p.to : '';
+      const room = rooms.roomOf(uid);
+      if (!room) return reply(cb, { ok: false, err: 'not-in-room' });
+      if (room.host !== uid) return reply(cb, { ok: false, err: 'not-host' });
+      if (room.state === 'playing') return reply(cb, { ok: false, err: 'started' });
+      if (room.members.size >= MAX_PLAYERS) return reply(cb, { ok: false, err: 'full' });
+      if (!to || to === uid || !areFriends(uid, to)) return reply(cb, { ok: false, err: 'not-friend' });
+      if (!sockets.has(to)) return reply(cb, { ok: false, err: 'offline' });
+      const k = to + ' ' + uid, t = now();
+      const old = invites.get(k);
+      if (old && old.key === room.key && t - old.at < REINVITE_MS) return reply(cb, { ok: false, err: 'rate' });
+      if (!limits.invite.take(uid)) return reply(cb, { ok: false, err: 'rate' });
+      invites.set(k, { from: uid, to, key: room.key, code: room.code.slice(), at: t });
+      // dex y shiny, los de la sala (ya limpios en rooms.js).
+      const m = room.members.get(uid);
+      send(to, 'invite', { from: uid, name: nameOf(uid, m.name), dex: m.dex, shiny: m.shiny === true, code: room.code.slice() });
+      reply(cb, { ok: true });
+    });
+
+    socket.on('invite-answer', (p0, cb0) => {
+      const [p, cb] = args(p0, cb0);
+      if (!ctl(cb)) return;
+      const from = typeof p.from === 'string' ? p.from : '';
+      const k = uid + ' ' + from;
+      const inv = invites.get(k);
+      if (!inv || now() - inv.at >= INVITE_MS) { invites.delete(k); return reply(cb, { ok: false, err: 'expired' }); }
+      invites.delete(k);
+      const accept = p.accept === true;
+      send(from, 'invite-answer', uid, accept);
+      if (!accept) return reply(cb, { ok: true });
+      const room = rooms.roomOf(from);
+      if (!room || room.key !== inv.key) return reply(cb, { ok: false, err: 'not-found' });
+      reply(cb, { ok: true, code: inv.code.slice() });
+    });
+
     socket.on('disconnect', () => {
       if (sockets.get(uid) !== socket) return;   // ya lo sustituyó otra conexión
       sockets.delete(uid);
       apply(rooms.markAway(uid, socket.id));
+      presence(uid, false);
     });
   });
 
@@ -368,6 +450,8 @@ function attach(httpServer, deps = {}) {
     apply(rooms.expire());
     const t = Date.now();
     for (const [k, x] of closedAway) if (t - x.at >= CLOSED_MEMORY_MS) closedAway.delete(k);
+    const ti = now();
+    for (const [k, x] of invites) if (ti - x.at >= INVITE_MS) invites.delete(k);
   }, deps.sweepMs || 1000);
   const clean = setInterval(() => limits.clean(), 60000);
   sweep.unref();
@@ -385,6 +469,25 @@ function attach(httpServer, deps = {}) {
     }
   }
 
+  // ¿Tiene esta cuenta un socket abierto? (el "en línea" de los amigos)
+  const online = uid => sockets.has(uid);
+
+  // Un evento al socket de una cuenta, si lo tiene abierto. -> true si salió
+  function send(uid, ev, ...a) {
+    const s = sockets.get(uid);
+    if (!s || !s.connected) return false;
+    s.emit(ev, ...a);
+    return true;
+  }
+
+  // El apodo nuevo de una cuenta: en su socket y, si está en una sala, para los demás.
+  function rename(uid, name) {
+    const s = sockets.get(uid);
+    if (!s) return;
+    s.data.info = { ...s.data.info, name };
+    if (rooms.roomOf(uid)) apply(rooms.update(uid, s.data.info));
+  }
+
   function close() {
     clearInterval(sweep);
     clearInterval(clean);
@@ -396,7 +499,7 @@ function attach(httpServer, deps = {}) {
     return { rooms: r.rooms, sockets: sockets.size, paths: r.paths, bytes: relayed };
   }
 
-  return { io, rooms, limits, stats, shutdown, kick, close };
+  return { io, rooms, limits, stats, shutdown, kick, online, send, rename, close };
 }
 
 module.exports = { attach, publicIp, sizeOf, originOk, VERSION };

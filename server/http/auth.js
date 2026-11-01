@@ -10,7 +10,7 @@
  *   POST   /api/auth/logout-all  {}               204: borra todas las de la cuenta
  *   GET    /api/me                                { me } o 401
  *   DELETE /api/me               {}               204: la cuenta, su partida y sus sesiones
- *   PUT    /api/me/name          { name }         { me }; invalid, taken
+ *   (PUT /api/me/name, el apodo, está en social.js)
  *
  * Invitado que entra con un correo: si el correo es nuevo, el invitado pasa a
  * ser esa cuenta (mismo uid, misma partida); si ya tiene cuenta, se entra en
@@ -19,7 +19,7 @@
  * invitado que pidió el código (codes.guest_uid) y lo comprueba con su sesión.
  *
  * El nombre de una cuenta nueva es "Guest" y 4 cifras hasta que elija apodo
- * (paso 6): no se reserva (name_lower NULL), así nunca se acaban, y nadie
+ * (social.js): no se reserva (name_lower NULL), así nunca se acaban, y nadie
  * puede elegir uno con esa forma.
  *
  * register(app, deps): deps = { cfg, db, guard, relay, mailer } (ver index.js).
@@ -32,10 +32,6 @@ const { mergeInto } = require('../../js/core/save-merge.js');
 const CODE_MS = 10 * 60 * 1000;
 const MAX_TRIES = 5;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-// El de social.js (VALID): 3 a 16 letras, números o _.
-const NAME_RE = /^[A-Za-z0-9_ñÑáéíóúÁÉÍÓÚ]{3,16}$/;
-// Los nombres por defecto (Guest y 4 cifras) no se pueden elegir: son de otros.
-const DEFAULT_RE = /^guest\d{4}$/i;
 
 const newUid = () => crypto.randomBytes(16).toString('base64url');
 const defaultName = () => 'Guest' + String(crypto.randomInt(10000)).padStart(4, '0');
@@ -57,8 +53,6 @@ function register(app, deps) {
     byEmail: db.prep('SELECT uid, kind, email, name FROM users WHERE email = ?'),
     upgrade: db.prep("UPDATE users SET kind = 'email', email = ? WHERE uid = ? AND kind = 'guest'"),
     delUser: db.prep('DELETE FROM users WHERE uid = ?'),
-    setName: db.prep('UPDATE users SET name = ?, name_lower = ? WHERE uid = ?'),
-    nameTaken: db.prep('SELECT uid FROM users WHERE name_lower = ? AND uid <> ?'),
     putCode: db.prep(`INSERT INTO codes (email, code_hash, expires, tries, guest_uid) VALUES (?, ?, ?, 0, ?)
                       ON CONFLICT (email) DO UPDATE SET code_hash = excluded.code_hash, expires = excluded.expires,
                       tries = 0, guest_uid = excluded.guest_uid`),
@@ -67,6 +61,7 @@ function register(app, deps) {
     delCode: db.prep('DELETE FROM codes WHERE email = ?'),
     oldCodes: db.prep('DELETE FROM codes WHERE expires < ?'),
     sessionsOf: db.prep('DELETE FROM sessions WHERE uid = ?'),
+    linked: db.prep('SELECT CASE WHEN a = @uid THEN b ELSE a END AS uid FROM friendships WHERE a = @uid OR b = @uid'),
     save: db.prep('SELECT rev, body FROM saves WHERE uid = ?'),
     putSave: db.prep(`INSERT INTO saves (uid, rev, body, updated) VALUES (?, ?, ?, ?)
                       ON CONFLICT (uid) DO UPDATE SET rev = excluded.rev, body = excluded.body, updated = excluded.updated`),
@@ -200,26 +195,14 @@ function register(app, deps) {
 
   app.delete('/api/me', b, guard.needSession, (req, res) => {
     // Sesiones, partida, perfil y amigos se van con la cuenta (ON DELETE CASCADE).
+    // A sus amigos se les avisa después ('friends'): sin la cuenta ya no se sabe quiénes eran.
+    const linked = q.linked.all({ uid: req.auth.uid }).map(r => r.uid);
     q.delUser.run(req.auth.uid);
     guard.clearCookie(res);
     relay.kick(req.auth.uid);
+    if (relay.send) for (const u of linked) relay.send(u, 'friends');
     res.status(204).end();
-  });
-
-  app.put('/api/me/name', b, guard.needSession, (req, res) => {
-    const name = req.body && typeof req.body.name === 'string' ? req.body.name.trim() : '';
-    if (!NAME_RE.test(name)) return guard.fail(res, 400, 'invalid');
-    if (DEFAULT_RE.test(name)) return guard.fail(res, 409, 'taken');
-    const lower = name.toLowerCase();
-    if (q.nameTaken.get(lower, req.auth.uid)) return guard.fail(res, 409, 'taken');
-    try {
-      q.setName.run(name, lower, req.auth.uid);
-    } catch (e) {
-      if (/UNIQUE/.test(e.message)) return guard.fail(res, 409, 'taken');
-      throw e;
-    }
-    res.json({ me: meOf(req.auth.uid) });
   });
 }
 
-module.exports = { register, cleanEmail, NAME_RE, CODE_MS, MAX_TRIES };
+module.exports = { register, cleanEmail, CODE_MS, MAX_TRIES };

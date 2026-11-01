@@ -397,14 +397,21 @@
       </form>
       <p id="code-msg" class="note"></p>
     </div>
+    <!-- Amigos (social-ui.js): sólo con correo; el invitado ve cómo añadirlo -->
     <div id="fr-online">
-      <p class="sub" id="fr-me"></p>
-      <form id="fr-add" class="row" autocomplete="off">
-        <input id="fr-name" class="field grow" maxlength="16" spellcheck="false" placeholder="Apodo de tu amigo">
-        <button class="btn gold" type="submit" data-sfx="confirm">Añadir amigo</button>
-      </form>
-      <p id="fr-msg" class="note"></p>
-      <div id="fr-list" class="fr-list"></div>
+      <div id="fr-guest" class="row wrap hidden" style="gap:10px;margin-top:12px">
+        <p class="sub" style="margin:0">Añade un correo para tener amigos.</p>
+        <button id="fr-guest-set" class="btn small gold" type="button">Ir a Ajustes</button>
+      </div>
+      <div id="fr-mine">
+        <p class="sub" id="fr-me"></p>
+        <form id="fr-add" class="row" autocomplete="off">
+          <input id="fr-name" class="field grow" maxlength="16" spellcheck="false" placeholder="Apodo de tu amigo">
+          <button class="btn gold" type="submit" data-sfx="confirm">Añadir amigo</button>
+        </form>
+        <p id="fr-msg" class="note"></p>
+        <div id="fr-list" class="fr-list"></div>
+      </div>
     </div>
   </div>
 </section>
