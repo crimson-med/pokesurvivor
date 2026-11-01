@@ -1,6 +1,6 @@
 # ¿Está el canal de YouTube en directo? Cada 5 min (GitHub lo retrasa a veces
 # unos minutos) mira la página /live del canal y deja live.json en la rama
-# «live»: { live, id, at }. El juego la lee (js/ui/live-ui.js) sin Firebase.
+# «live»: { live, id, at }. (El juego ya no la lee: js/ui/live-ui.js.)
 # Sólo se sube algo al cambiar o, en directo, cada 30 min (para que «at» no
 # caduque). Gratis: el repositorio es público.
 name: live

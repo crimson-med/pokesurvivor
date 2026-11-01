@@ -5,7 +5,9 @@
  *   programar y depurar cómodamente). SE EDITA dev.html, no index.html.
  * - index.html se genera a partir de dev.html, cambiando el bloque de scripts
  *   por js/app.min.js (con la huella en la URL para que no se quede en caché).
- * - node tools/build.js --sin-seo  ->  sin lo de SEO (hasta tener pokesurvivor.com).
+ * - node tools/build.js --sin-seo  ->  sin lo de SEO (hasta tener dominio).
+ * - SITE_URL=https://tu.web node tools/build.js  ->  la dirección pública del juego
+ *   (canonical, redes, datos estructurados, «Web oficial»). Sin ella, http://localhost:8787.
  * - Después hay que regenerar en/index.html: python tools/make_seo_pages.py
  */
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
@@ -13,6 +15,11 @@ const { execFileSync } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 const DEV = path.join(ROOT, 'dev.html'), OUT = path.join(ROOT, 'index.html');
 const BEGIN = '<!-- scripts:begin -->', END = '<!-- scripts:end -->';
+// La dirección pública del juego, sin la barra del final. En dev.html las URL de SEO y
+// <meta name="ps-site"> van relativas ("./..."): aquí se cambian por SITE_URL.
+const SITE = (process.env.SITE_URL || 'http://localhost:8787').trim().replace(/\/+$/, '');
+if (!/^https?:\/\/[^\s"'<>\\/]+$/.test(SITE)) throw new Error('SITE_URL no vale (ej. https://tu.web): ' + SITE);
+if (!process.env.SITE_URL) console.warn('[aviso] sin SITE_URL: la web del juego será ' + SITE + ' (para publicar: SITE_URL=https://tu.web node tools/build.js)');
 
 const dev = fs.readFileSync(DEV, 'utf8');
 const i = dev.indexOf(BEGIN), j = dev.indexOf(END);
@@ -76,8 +83,13 @@ if (!dev.includes(CSS)) throw new Error('dev.html no carga ' + CSS + ' como se e
 const cssHash = crypto.createHash('sha1').update(fs.readFileSync(path.join(ROOT, 'css', 'style.css'))).digest('hex').slice(0, 10);
 html = html.replace(CSS, `<link rel="stylesheet" href="css/style.css?v=${cssHash}">`);
 html = html.replace(/<meta name="robots" content="noindex">\s*/, '');
+// SITE_URL: "./" en las etiquetas de SEO y en ps-site pasa a ser la dirección pública.
+const PS_SITE = '<meta name="ps-site" content="./">';
+if (!html.includes(PS_SITE)) throw new Error('dev.html no tiene ' + PS_SITE + ': revisa build.js');
+html = html.replace(PS_SITE, `<meta name="ps-site" content="${SITE}/">`);
+html = html.replace(/<!-- seo:begin -->[\s\S]*?<!-- seo:end -->/g, b => b.split('"./').join(`"${SITE}/`));
 // --sin-seo: sin canonical/redes/datos estructurados ni enlaces a las páginas
-// (para publicar antes de tener el dominio pokesurvivor.com).
+// (para publicar antes de tener dominio).
 const SIN_SEO = process.argv.includes('--sin-seo');
 html = SIN_SEO ? html.replace(/<!-- seo:begin -->[\s\S]*?<!-- seo:end -->\n?/g, '') : html.replace(/<!-- seo:(begin|end) -->\n?/g, '');
 html = html.replace(/<!-- dev.html: página fuente[^>]*-->/, '<!-- GENERADO desde dev.html por tools/build.js: no editar a mano (se edita dev.html). -->');
@@ -88,4 +100,4 @@ fs.writeFileSync(OUT, html);
 const FORZAR = process.argv.includes('--forzar');
 fs.writeFileSync(path.join(ROOT, 'version.json'), JSON.stringify(Object.assign({ v: hash, at: new Date().toISOString() }, FORZAR ? { force: true } : {})) + '\n');
 console.log('ok: diccionarios ' + langSizes.join(' · '));
-console.log(`${FORZAR ? '[OBLIGATORIA] ' : ''}${SIN_SEO ? '[sin SEO] ' : ''}${EXPOSE ? '[SIN PROTEGER, sólo pruebas] ' : ''}ok: ${files.length} scripts · ${(joined.length / 1024).toFixed(0)} KB -> ${(min.length / 1024).toFixed(0)} KB (app.min.js?v=${hash})`);
+console.log(`${FORZAR ? '[OBLIGATORIA] ' : ''}${SIN_SEO ? '[sin SEO] ' : ''}${EXPOSE ? '[SIN PROTEGER, sólo pruebas] ' : ''}ok: ${SITE} · ${files.length} scripts · ${(joined.length / 1024).toFixed(0)} KB -> ${(min.length / 1024).toFixed(0)} KB (app.min.js?v=${hash})`);

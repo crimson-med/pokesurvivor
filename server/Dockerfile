@@ -1,7 +1,9 @@
 # ============ Dockerfile: la imagen del servidor (juego, API, cooperativo, SQLite) ============
 # Se construye desde la raíz del repositorio (hace falta el juego entero):
-#   docker build -f server/Dockerfile -t ps .
-#   docker run -p 8787:8787 -v ps-data:/data -e CODE_PEPPER=<secreto> ps
+#   docker build -f server/Dockerfile --build-arg SITE_URL=https://tu.web -t ps .
+#   docker run -p 8787:8787 -v ps-data:/data -e CODE_PEPPER=<secreto> -e SITE_URL=https://tu.web ps
+# SITE_URL al construir: la dirección que va en el juego (canonical, «Web oficial»);
+# al arrancar: la que mira el servidor (Origin, cookie). La misma en los dos.
 # La base de datos vive en el volumen /data. bookworm-slim y no Alpine:
 # better-sqlite3 trae binarios ya compilados para glibc.
 
@@ -15,7 +17,8 @@ COPY server/package.json server/package-lock.json ./server/
 RUN cd server && npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY . .
 # tools/build.js usa npx (terser y javascript-obfuscator): necesita red.
-RUN node tools/build.js && node tools/export_data.js
+ARG SITE_URL=http://localhost:8787
+RUN SITE_URL="$SITE_URL" node tools/build.js && node tools/export_data.js
 
 # ---------- 2: la imagen final, sólo lo que se sirve y el servidor ----------
 FROM node:22-bookworm-slim

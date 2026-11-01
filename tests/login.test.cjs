@@ -37,7 +37,8 @@ function load(db) {
   const ctx = {
     G: {
       UI: { $, chrome() {}, show() {}, toast: t => toasts.push(t), refreshCoins() {} },
-      DB: db, I18n: { lang: 'es', has: () => false }, T: s => s,
+      DB: db, I18n: { lang: 'es', has: () => false, f: (s, ...v) => { let i = 0; return s.replace(/\{x\}/g, () => v[i++]); } }, T: s => s,
+      siteHost: () => 'play.example.com',
       Flow: { afterLogin: () => flow.after++, goMenu: () => flow.menu++ }
     },
     document: { querySelectorAll: s => (s === '#otp input' ? otp : s === '#login-local .tab' ? tabs : []) },
@@ -74,6 +75,8 @@ test('correo, luego el código en 6 casillas: pegarlo las llena y entra solo', a
   assert.equal($('login-code').hidden, true);
   assert.equal($('login-local').hidden, true);
   assert.equal($('btn-guest').hidden, false);
+  // La web oficial es la de SITE_URL (G.siteHost), no la del juego original.
+  assert.equal($('login-official').textContent, 'Web oficial: play.example.com · si alguien te pide pagar, no somos nosotros');
   $('f-email').value = 'no-es-correo';
   await submit($('login-email'));
   assert.equal($('login-err').textContent, 'Escribe un correo válido.');

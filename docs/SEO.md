@@ -19,14 +19,13 @@ Todo lo técnico ya está preparado en el código. Falta lo que sólo puedes hac
 Las páginas se regeneran con `python tools/make_seo_pages.py` (por ejemplo, si
 cambian los Pokémon o las características).
 
-> **Importante:** las direcciones canónicas ya apuntan a `https://pokesurvivor.com/`.
-> No publiques estos cambios hasta que el dominio funcione, o Google intentará
-> indexar un dominio que todavía no existe.
+> **Importante:** las direcciones canónicas salen de `SITE_URL` (la leen
+> `tools/build.js` y `tools/make_seo_pages.py`; sin ella, `http://localhost:8787`).
+> Construye con la tuya antes de publicar, o Google intentará indexar otra dirección.
 
 ## 1. Dominio
 
-Los pasos para poner en marcha pokesurvivor.com (DNS en Cloudflare, GitHub Pages,
-Firebase y el paso final) están en [DOMINIO.md](DOMINIO.md).
+Cómo publicar el juego con tu dominio: [relay-coop/13-step-9-deploy.md](relay-coop/13-step-9-deploy.md).
 
 ## 2. Google Search Console (lo más importante)
 

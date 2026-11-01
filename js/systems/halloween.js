@@ -1,7 +1,7 @@
 /* ============ halloween.js — el evento de Halloween (30-10 al 1-11) ============
  * Del 30 de octubre al 1 de noviembre (hora de España, de cualquier año) el
- * juego cambia solo; el 2 vuelve todo a la normalidad. Nada de esto usa
- * Firebase: los caramelos y las skins van en la partida que ya se guarda.
+ * juego cambia solo; el 2 vuelve todo a la normalidad. Nada de esto pide
+ * nada al servidor: los caramelos y las skins van en la partida que ya se guarda.
  *
  *   - mapa de Halloween (biomas de noche con calabazas: world/tiles.js, world/world.js)
  *   - más Pokémon Fantasma (data/enemies.js)

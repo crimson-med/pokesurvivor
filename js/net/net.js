@@ -30,7 +30,10 @@
  *   recarga   cada carga de la página tiene su ep (relay.js), que sale en la
  *             foto de la sala. Si el de un jugador cambia (ha recargado), la
  *             pareja empieza de cero la numeración por los dos lados y se rehace
- *             la conexión.
+ *             la conexión. Cada 'm' y cada 'ack' llevan además el ep de la página
+ *             a la que van (el que sabe quien los manda): el servidor y quien los
+ *             recibe tiran lo numerado para una página de antes, tenga el número
+ *             que tenga.
  *   el anfitrión avisa al servidor del camino de cada invitado ('path'); el
  *             invitado lo ve en la foto de la sala y deja de esperar al directo.
  *
@@ -65,7 +68,9 @@ G.Net = (() => {
   // Números que llegan antes que alguno anterior (al pasar de un camino a otro): se
   // apuntan hasta AHEAD_MAX; un número disparatado (más de SEQ_JUMP por delante) se tira.
   // Una pareja que aún no ha recibido nada sólo acepta los AHEAD_MAX primeros: lo que
-  // llegue con números altos es de antes de que el otro recargara.
+  // llegue con números altos es de antes de que el otro recargara. (Lo de antes con
+  // números bajos lo tira el ep de cada 'm', ver onRelayMsg; esto queda por si un
+  // 'm' llega sin él.)
   const AHEAD_MAX = 256, SEQ_JUMP = 100000;
 
   let uid = null, roomId = null, isHost = false, hostUid = null;
@@ -282,10 +287,14 @@ G.Net = (() => {
     return packed && packed.byteLength < jsonBytes ? packed : json;
   }
 
-  /** Por el servidor, con su número. Devuelve lo que ocupa. */
+  /**
+   * Por el servidor, con su número y el ep de la página de to que conocemos (la
+   * numeración es para esa página: si to ha recargado, el servidor lo tira). Devuelve
+   * lo que ocupa.
+   */
   function relayM(to, n, msg) {
     const bytes = relayBytes(msg), size = typeof bytes === 'string' ? G.NetCodec.size(bytes) : bytes.byteLength;
-    G.Relay.emit('m', to, n, bytes);
+    G.Relay.emit('m', to, n, bytes, eps.get(to) || null);
     stats.relaySent++;
     return size;
   }
@@ -372,14 +381,22 @@ G.Net = (() => {
     } else if (!s.ackT) s.ackT = setTimeout(() => { s.ackT = 0; if (s.ackN && pairs.get(from) === s) sendAck(s); }, now ? ACK_NOW_MS : ACK_MS);
   }
 
-  /** Confirma el último número sin huecos (no el más alto visto: lo de en medio puede faltar). */
+  /**
+   * Confirma el último número sin huecos (no el más alto visto: lo de en medio puede
+   * faltar), con el ep de la página del anfitrión a la que va (como los 'm').
+   */
   function sendAck(s) {
     clearTimeout(s.ackT); s.ackT = 0; s.ackN = 0;
-    G.Relay.emit('ack', s.inSeen);
+    G.Relay.emit('ack', s.inSeen, eps.get(hostUid) || null);
   }
 
-  /** Anfitrión: el invitado confirma hasta seq; eso ya no hace falta guardarlo. */
-  function onRelayAck(from, seq) {
+  /**
+   * Anfitrión: el invitado confirma hasta seq; eso ya no hace falta guardarlo. Una
+   * confirmación para otra página nuestra (de antes de recargar) se tira: si no,
+   * quitaría de lo guardado lo nuevo con esos números aunque no haya llegado.
+   */
+  function onRelayAck(from, seq, ep) {
+    if (typeof ep === 'string' && G.Relay.ep && ep !== G.Relay.ep) return;
     const s = pairs.get(from);
     if (!isHost || !s || typeof seq !== 'number' || !(seq > s.acked) || seq > s.out) return;
     s.acked = seq; s.ackSeen = true;
@@ -390,9 +407,15 @@ G.Net = (() => {
     if (typeof from === 'string' && sig && typeof sig === 'object') onSignal(from, sig);
   }
 
-  /** Mensaje de la partida por el servidor: (de quién, número, binario o JSON). */
-  function onRelayMsg(from, seq, bytes) {
+  /**
+   * Mensaje de la partida por el servidor: (de quién, número, binario o JSON, ep). ep es
+   * la página para la que lo numeró quien lo manda: si no es esta (lo mandó antes de
+   * saber que habíamos recargado), es de la numeración de antes y se tira entero, sea
+   * cual sea su número (y sin confirmarlo: esa numeración ya no existe).
+   */
+  function onRelayMsg(from, seq, bytes, ep) {
     if (typeof from !== 'string' || (isHost ? !peers.has(from) : from !== hostUid)) return;
+    if (typeof ep === 'string' && G.Relay.ep && ep !== G.Relay.ep) return;
     let m;
     if (typeof bytes === 'string') {
       try { m = JSON.parse(bytes); } catch (e) { return; }

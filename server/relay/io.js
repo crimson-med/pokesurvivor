@@ -377,25 +377,35 @@ function attach(httpServer, deps = {}) {
       return false;
     };
 
-    socket.on('m', (to, seq, bytes) => {
+    // m(to, seq, bytes, ep): ep es la página de to para la que va numerado. Si to ha
+    // recargado desde entonces (otro ep), es de la numeración de antes: se tira.
+    // Le llega como m(from, seq, bytes, ep).
+    socket.on('m', (to, seq, bytes, ep) => {
       if (!mOk()) return;
       if (!isSeq(seq)) return;
       const n = sizeOf(bytes);
       if (n > c.maxMsgBytes) return;
       const t = rooms.target(uid, to);
-      if (!t || !forward(t.member, 'm', uid, seq, bytes)) return;
+      if (!t) return;
+      const toEp = cleanEp(ep);
+      if (toEp && t.member.ep && toEp !== t.member.ep) return;
+      if (!forward(t.member, 'm', uid, seq, bytes, toEp)) return;
       relayed += n;
       t.room.bytes += n;
     });
 
-    // ack(seq): del invitado al anfitrión; le llega como ack(from, seq).
-    socket.on('ack', seq => {
+    // ack(seq, ep): del invitado al anfitrión; le llega como ack(from, seq, ep). Como
+    // en m, ep es la página del anfitrión que confirma: si es otra, se tira.
+    socket.on('ack', (seq, ep) => {
       if (!mOk()) return;
       if (!isSeq(seq)) return;
       const room = rooms.roomOf(uid);
       if (!room || room.host === uid) return;
       const t = rooms.target(uid);
-      if (t) forward(t.member, 'ack', uid, seq);
+      if (!t) return;
+      const toEp = cleanEp(ep);
+      if (toEp && t.member.ep && toEp !== t.member.ep) return;
+      forward(t.member, 'ack', uid, seq, toEp);
     });
 
     // ---------- Invitaciones a la sala (sólo a amigos conectados) ----------

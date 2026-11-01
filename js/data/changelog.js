@@ -6,6 +6,26 @@
  * Cada línea en español y en inglés.
  */
 G.CHANGELOG = [
+  { d: '2026-11-02', title: ["Entrar con un código y cooperativo en cualquier red", "Sign in with a code and co-op on any network"], new: [
+    ["Para entrar ya no hace falta contraseña: escribe tu correo y te llega un código de 6 cifras. También puedes jugar como invitado y añadir un correo más tarde sin perder nada.",
+     "No more passwords: type your email and you get a 6-digit code to sign in. You can also play as a guest and add an email later without losing anything."],
+    ["Cooperativo en cualquier red: los jugadores se conectan directamente cuando se puede y, si no, a través del servidor del juego.",
+     "Co-op on every network: players connect directly when possible and through the game's server otherwise."],
+    ["Códigos de sala con cuatro Pokémon: compártelos con tus amigos para que entren en tu sala.",
+     "Room codes made of four Pokémon: share them with your friends so they can join your room."],
+    ["Amigos: ves quién está en línea ahora mismo.",
+     "Friends: see who is online right now."],
+    ["Nueva opción «Ocultar mi IP en cooperativo» (Ajustes): juegas siempre a través del servidor y los demás jugadores no ven tu IP.",
+     "New \"Hide my IP in co-op\" option (Settings): you always play through the server and the other players can't see your IP."],
+    ["Tu partida se sube a la nube sola, como mucho 10 segundos después de cada cambio.",
+     "Your game uploads to the cloud on its own, within 10 seconds of each change."]
+  ], chg: [
+    ["El botón de YouTube de la barra de arriba ya no se pone rojo con «EN DIRECTO»: el juego sólo habla con su propio servidor.",
+     "The YouTube button in the top bar no longer turns red with \"LIVE\": the game only talks to its own server."]
+  ], fix: [
+    ["Cooperativo: si alguien recargaba la página en los primeros segundos de una partida, le podía llegar algo de antes de recargar y perderse lo nuevo. Ahora lo de antes se tira entero.",
+     "Co-op: if someone reloaded the page in the first seconds of a run, they could get messages from before the reload and miss the new ones. Now everything from before is dropped."]
+  ]},
   { d: '2026-11-02', title: ["Cooperativo: jefes y enemigos al día", "Co-op: bosses and enemies in sync"], fix: [
     ["Cooperativo: si no eras el anfitrión, al golpear a un jefe su barra de vida bajaba, volvía a subir y bajaba otra vez. Ahora baja una vez y se queda.",
      "Co-op: if you weren't the host, hitting a boss made its health bar drop, jump back up and drop again. Now it drops once and stays down."],

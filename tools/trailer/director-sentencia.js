@@ -749,7 +749,7 @@ try { localStorage.setItem('ps.lang', 'es'); } catch (e) { /* nada */ }
         c.fillStyle = '#ffd23f'; rrect(-230, -36, 460, 72, 14); c.fill();
         c.fillStyle = '#1d0e00'; rrect(-224, -30, 448, 60, 10); c.fill();
         c.restore();
-        text('pokesurvivor.com', W / 2, H / 2 + 168, 44, { scale: s, depth: 0, stroke: 0 });
+        text(window.__siteHost || G.siteHost(), W / 2, H / 2 + 168, 44, { scale: s, depth: 0, stroke: 0 });   // SITE_URL (record.mjs)
       }
       text('Proyecto de fans sin ánimo de lucro. Pokémon © Nintendo / Creatures / GAME FREAK.', W / 2, H - 22, 15,
         { fill: 'rgba(255,255,255,.55)', depth: 0, stroke: 0, weight: 400 });

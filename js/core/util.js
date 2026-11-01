@@ -4,6 +4,18 @@ window.G = window.G || {};
 /** Altura a la que vuelan proyectiles y efectos sobre el plano del suelo. */
 G.LIFT = 18;
 
+/**
+ * La web del juego, sin https:// (para «Web oficial: …»): la de SITE_URL, que
+ * tools/build.js pone en <meta name="ps-site">. Sin construir (dev.html), la de
+ * esta página.
+ */
+G.siteHost = () => {
+  try {
+    const m = document.querySelector('meta[name="ps-site"]');
+    return new URL(m ? m.content : './', location.href).host || location.host || '';
+  } catch (e) { return (typeof location !== 'undefined' && location.host) || ''; }
+};
+
 G.U = {
   clamp(v, a, b) { return v < a ? a : v > b ? b : v; },
   /*

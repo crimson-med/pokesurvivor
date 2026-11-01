@@ -233,6 +233,53 @@ test('anfitrión e invitado se pasan sig y m; from es el uid del que manda', asy
   assert.equal(aseq, 7);
 });
 
+test('m numerado para una página de antes (otro ep) se tira; para la de ahora llega con su ep', async () => {
+  const { host, guest } = await hostAndGuest('hep', 'gep');
+  let got = once(guest, 'm', 2000, 4);
+  host.emit('m', 'gep', 3, 'ahora', 'ep-gep');
+  assert.deepEqual(await got, ['hep', 3, 'ahora', 'ep-gep']);
+  // El invitado recarga: otra página, otro ep, el mismo hueco.
+  const away = once(host, 'peer');
+  guest.close();
+  await away;
+  const back = client('gep', { auth: { ep: 'ep-gep-2' } });
+  const online = once(host, 'peer');
+  await connected(back);
+  await online;
+  const stale = never(back, 'm', 250);
+  host.emit('m', 'gep', 4, 'de antes', 'ep-gep');
+  await stale;
+  got = once(back, 'm', 2000, 4);
+  host.emit('m', 'gep', 1, 'nueva', 'ep-gep-2');
+  assert.deepEqual(await got, ['hep', 1, 'nueva', 'ep-gep-2']);
+  // Sin ep (un cliente de antes): pasa, como siempre.
+  got = once(back, 'm', 2000, 4);
+  host.emit('m', 'gep', 2, 'sin ep');
+  assert.deepEqual(await got, ['hep', 2, 'sin ep', null]);
+});
+
+test('ack para una página del anfitrión de antes (otro ep) se tira; para la de ahora llega con su ep', async () => {
+  const { host, guest, made } = await hostAndGuest('hak', 'gak');
+  let got = once(host, 'ack', 2000, 3);
+  guest.emit('ack', 4, 'ep-hak');
+  assert.deepEqual(await got, ['gak', 4, 'ep-hak']);
+  // El anfitrión recarga: otra página, otro ep, la misma sala.
+  const away = once(guest, 'peer');
+  host.close();
+  await away;
+  const back = client('hak', { auth: { ep: 'ep-hak-2' } });
+  const snap = once(guest, 'room');
+  await connected(back);
+  assert.equal((await snap)[0].members.find(m => m.uid === 'hak').ep, 'ep-hak-2');
+  const stale = never(back, 'ack', 250);
+  guest.emit('ack', 8, 'ep-hak');
+  await stale;
+  got = once(back, 'ack', 2000, 3);
+  guest.emit('ack', 2, 'ep-hak-2');
+  assert.deepEqual(await got, ['gak', 2, 'ep-hak-2']);
+  assert.ok(made.ok);
+});
+
 test('un invitado no llega a otro invitado: va al anfitrión', async () => {
   const { host, guest: g1, made } = await hostAndGuest('hc', 'gc1');
   const g2 = await connected(client('gc2'));

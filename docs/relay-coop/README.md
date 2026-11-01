@@ -42,14 +42,14 @@ Each step is one PR into `standalone` (see
 [16-from-the-prs.md](16-from-the-prs.md#branch-plan)). The game keeps working
 after every step.
 
-- [ ] Step 1: one server
-- [ ] Step 2: accounts
-- [ ] Step 3: saves
-- [ ] Step 4: co-op over the socket
-- [ ] Step 5: room codes and lobby
-- [ ] Step 6: friends and invites
-- [ ] Step 7: rankings and moderation
-- [ ] Step 8: cleanup
+- [x] Step 1: one server
+- [x] Step 2: accounts
+- [x] Step 3: saves
+- [x] Step 4: co-op over the socket
+- [x] Step 5: room codes and lobby
+- [x] Step 6: friends and invites
+- [x] Step 7: rankings and moderation
+- [x] Step 8: cleanup
 - [ ] Step 9: deploy
 - [ ] Step 10: field test
 

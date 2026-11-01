@@ -119,8 +119,8 @@ and invites are instant.
 | `kick` | `{ uid }` | `{ ok }` | Host |
 | `path` | `(uid, 'direct' \| 'server')` | none | Host |
 | `sig` | `(to, payload)` | none | Host to a guest; guest to the host |
-| `m` | `(to, seq, bytes)` | none | Host to a guest; guest to the host |
-| `ack` | `(seq)` | none | Guest, server path only |
+| `m` | `(to, seq, bytes, ep)` | none | Host to a guest; guest to the host. `ep` is the page load of `to` the numbering is for (see below) |
+| `ack` | `(seq, ep)` | none | Guest, server path only. `ep` is the host page load it acks |
 | `invite` | `{ to }` | `{ ok }` or `{ ok: false, err }` | Host, to a friend |
 | `invite-answer` | `{ from, accept }` | `{ ok, code }` | Invited friend |
 
@@ -134,8 +134,8 @@ and invites are instant.
 | --- | --- | --- |
 | `room` | `{ code, state, mode, host, directWaitMs, members: [{ uid, name, dex, shiny, online, path, sameNet, hideIp }] }` | Any room change |
 | `sig` | `(from, payload)` | Forwarded setup message |
-| `m` | `(from, seq, bytes)` | Forwarded match message |
-| `ack` | `(from, seq)` | To the host |
+| `m` | `(from, seq, bytes, ep)` | Forwarded match message (`ep` as sent, or `null`) |
+| `ack` | `(from, seq, ep)` | To the host (`ep` as sent, or `null`) |
 | `peer` | `(uid, 'online' \| 'away' \| 'gone')` | A member drops, returns, or their slot expires |
 | `closed` | `(why)` | `host-left`, `idle`, `kicked`, `server-restart` |
 | `invite` | `{ from, name, dex, shiny, code }` | A friend invites you. Expires after 3 minutes. |
@@ -157,6 +157,11 @@ Unchanged from PR 6:
   wasn't acked when the direct channel closes or a peer comes back.
 - The guest sends `ack(seq)` every 5 messages and at least once a second on the
   server path. `G.Net.busy(u)` is true over 64 KB unacked.
+- A reload starts a new numbering for that pair on both sides. Each `m` and
+  `ack` carries the `ep` of the page it was numbered for. The server drops one
+  whose `ep` is not the recipient's current one, and the receiver drops one
+  whose `ep` is not its own, whatever its number. One with no `ep` passes as
+  before.
 
 ## Limits
 

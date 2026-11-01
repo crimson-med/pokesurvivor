@@ -5,7 +5,8 @@
  *   (se van guardando según se usan: no se descarga todo de golpe).
  *   Menos los disfraces (assets/pokemon/{dex}/k-*, tools/make_skins.py): esos
  *   se pueden retocar, así que van como el código (primero la red).
- * - Firebase y demás servicios de fuera no se tocan.
+ * - Lo del servidor del juego (/api/ y el socket, /socket.io/) no se toca
+ *   nunca: va siempre a la red, sin caché. Las demás webs tampoco.
  */
 const CODE = 'ps-code-v1', ART = 'ps-art-v1';
 
@@ -24,6 +25,7 @@ self.addEventListener('fetch', e => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== location.origin) return;
+  if (/^\/(api|socket\.io)\//.test(url.pathname)) return;
   const art = /\/assets\/(pokemon|icons|fonts)\//.test(url.pathname) && !/\/k-[a-z0-9-]+\//.test(url.pathname);
   if (art) {
     e.respondWith(caches.open(ART).then(async c => {

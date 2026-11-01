@@ -5,4 +5,4 @@ Disallow: /tools/
 Disallow: /docs/
 Disallow: /dev.html
 
-Sitemap: https://pokesurvivor.com/sitemap.xml
+Sitemap: http://localhost:8787/sitemap.xml
