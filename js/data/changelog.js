@@ -6,6 +6,12 @@
  * Cada línea en español y en inglés.
  */
 G.CHANGELOG = [
+  { d: '2026-11-02', title: ["Cooperativo: jefes y enemigos al día", "Co-op: bosses and enemies in sync"], fix: [
+    ["Cooperativo: si no eras el anfitrión, al golpear a un jefe su barra de vida bajaba, volvía a subir y bajaba otra vez. Ahora baja una vez y se queda.",
+     "Co-op: if you weren't the host, hitting a boss made its health bar drop, jump back up and drop again. Now it drops once and stays down."],
+    ["Cooperativo: si no eras el anfitrión y te movías muy deprisa o la conexión iba lenta, los enemigos podían aparecer de golpe a tu lado, ya medio derrotados. Ahora llegan a tiempo los de toda la pantalla, y con una conexión lenta se mandan antes los de cerca en vez de pararse todo.",
+     "Co-op: if you weren't the host and moved very fast or had a slow connection, enemies could suddenly pop up next to you, already half defeated. Now the ones across the whole screen arrive in time, and with a slow connection the nearby ones are sent first instead of everything freezing."]
+  ]},
   { d: '2026-10-27', title: ["Cooperativo más estable", "Steadier co-op"], new: [
     ["Móvil y tableta: nuevo joystick «Anclado» (Ajustes → Controles → Colocar los botones). Aparece donde pones el dedo y se queda en ese sitio mientras lo mantienes, aunque alejes el dedo; al levantarlo y tocar en otro sitio, aparece allí. El «Flotante» de siempre sigue al dedo y sigue siendo el que viene puesto.",
      "Mobile and tablet: new \"Anchored\" joystick (Settings → Controls → Place the buttons). It appears where you put your finger and stays in that spot while you hold it, even if you move your finger away; lift it and touch somewhere else, and it appears there. The usual \"Floating\" one follows your finger and is still the default."]
