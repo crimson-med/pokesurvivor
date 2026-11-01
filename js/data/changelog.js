@@ -6,6 +6,10 @@
  * Cada línea en español y en inglés.
  */
 G.CHANGELOG = [
+  { d: '2026-11-02', title: ["Cooperativo: vuelta de las grietas", "Co-op: coming back from rifts"], fix: [
+    ["Cooperativo: al acabar la pelea de una grieta, a veces un invitado se quedaba en la arena mientras los demás ya habían vuelto al mapa (pasaba si su conexión se cortaba un momento justo entonces). Ahora vuelve con los demás, y lo que se manda durante un corte ya no se pierde: sale al volver la conexión.",
+     "Co-op: when a rift fight ended, a guest sometimes stayed in the arena while everyone else was already back on the map (it happened if their connection dropped for a moment right then). Now they come back with everyone else, and what is sent during a drop is no longer lost: it goes out when the connection is back."]
+  ]},
   { d: '2026-10-28', title: ["Cooperativo: aparatos lentos y misma wifi", "Co-op: slower devices and same Wi-Fi"], new: [
     ["Cooperativo en la misma wifi: si dos jugadores en la misma red no conseguían conectar, ahora el anfitrión puede escribir su IP local (Amigos › Misma wifi, o «Conectar en local» en la sala cuando el juego ve que estáis en la misma wifi) y la conexión va directa. Y con «Entrar por IP», quien esté en tu wifi entra en tu sala sin tener que ser tu amigo.",
      "Same Wi-Fi co-op: if two players on the same network couldn't connect, the host can now type their local IP (Friends › Same Wi-Fi, or \"Connect locally\" in the room when the game sees you're on the same Wi-Fi) and the connection goes direct. And with \"Join by IP\", anyone on your Wi-Fi can join your room without being your friend."]

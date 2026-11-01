@@ -1144,4 +1144,6 @@ G.I18n.add({
   "Sólo el anfitrión de la sala puede hacerlo.": "Only the room host can do that.",
   "No se pudo comprobar tu red. Revisa la conexión y prueba otra vez.": "Couldn't check your network. Check your connection and try again.",
   "No hay ninguna sala en {x} en esta wifi. Revisa el número y que estéis en la misma red.": "No room at {x} on this Wi-Fi. Check the number, and that you're both on the same network.",
+  "Cooperativo: vuelta de las grietas": "Co-op: coming back from rifts",
+  "Cooperativo: al acabar la pelea de una grieta, a veces un invitado se quedaba en la arena mientras los demás ya habían vuelto al mapa (pasaba si su conexión se cortaba un momento justo entonces). Ahora vuelve con los demás, y lo que se manda durante un corte ya no se pierde: sale al volver la conexión.": "Co-op: when a rift fight ended, a guest sometimes stayed in the arena while everyone else was already back on the map (it happened if their connection dropped for a moment right then). Now they come back with everyone else, and what is sent during a drop is no longer lost: it goes out when the connection is back."
 });
