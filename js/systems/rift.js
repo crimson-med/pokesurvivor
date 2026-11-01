@@ -16,6 +16,8 @@
  * Cooperativo: lo decide el anfitrión. Mensajes (ver coop.js):
  *   'rift' x y ttl · 'riftx' · 'arena' cfg · 'aw' (ganada) · 'al' (perdida)
  *   y del invitado al anfitrión 're' (he entrado en la grieta).
+ *   Además, en cada envío del anfitrión, en qué grieta va y cómo acabó (netState):
+ *   si a un invitado no le llega el 'aw'/'al', sale igual con el siguiente envío.
  */
 G.Rift = (() => {
   // (0.14 hasta el 11-10-2026: más grietas para que se vean los vínculos)
@@ -28,10 +30,11 @@ G.Rift = (() => {
   let arena = null;         // { tx, ty, r, dex, shiny, x, y, back, biome, t, phase, endT, bossId }
   let zone = null;          // dónde estaba la última arena { x, y, r } (ver leftBehind)
   let checkT = CHECK, asked = false, downT = 0, misses = 0;
+  let num = 0, result = 0;  // número de la última arena (anfitrión) y cómo acabó: 2 ganada, 3 perdida
   const authority = () => !G.Coop.active || G.Coop.isHost;
   const TS = () => G.Tiles.T * G.Sprites.PX;
 
-  function reset() { rift = null; arena = null; zone = null; checkT = CHECK; asked = false; downT = 0; misses = 0; }
+  function reset() { rift = null; arena = null; zone = null; checkT = CHECK; asked = false; downT = 0; misses = 0; num = 0; result = 0; }
 
   /**
    * ¿Sigue este jugador en la arena aunque aquí ya se haya vuelto al mapa?
@@ -112,7 +115,8 @@ G.Rift = (() => {
       tx: 5000 + Math.floor(Math.random() * 3000), ty: 5000 + Math.floor(Math.random() * 3000), r: ARENA_R,
       dex: mon.dex, shiny: G.Sprites.hasShiny(mon.dex) && Math.random() < 1 / 512,
       // La arena es la de uno de sus tipos, al azar.
-      type: forceType || G.U.pick(mon.types)
+      type: forceType || G.U.pick(mon.types),
+      n: ++num
     };
     if (G.Coop.isHost) G.Coop.broadcast(['arena', cfg]);
     begin(cfg);
@@ -201,7 +205,7 @@ G.Rift = (() => {
 
   function won() {
     if (!arena || arena.phase !== 'fight') return;
-    arena.phase = 'won'; arena.endT = 5;
+    arena.phase = 'won'; arena.endT = 5; result = 2;
     G.Progress.event('rift', { type: arena.type });
     G.Pickups.pullAll();
     G.Spawner.say('¡Has vencido a ' + G.DEX_BY[arena.dex].name + '! Recoge el premio…', 3.4, true);
@@ -216,7 +220,7 @@ G.Rift = (() => {
 
   function lost() {
     if (!arena || arena.phase !== 'fight') return;
-    arena.phase = 'lost'; arena.endT = 1.2;
+    arena.phase = 'lost'; arena.endT = 1.2; result = 3;
     G.Spawner.say('La grieta os ha expulsado…', 2.6, true);
     G.Audio.sfx('back');
   }
@@ -280,8 +284,27 @@ G.Rift = (() => {
     }
   }
 
+  /** Anfitrión, en cada envío: [número de la arena, 1 pelea / 2 ganada / 3 perdida] (0 0: ninguna aún). */
+  function netState() {
+    return [num, arena ? (arena.phase === 'fight' ? 1 : arena.phase === 'won' ? 2 : 3) : result];
+  }
+
+  /*
+   * Invitado: el fin de la arena llegaba sólo en un aviso suelto ('aw'/'al'). Si se
+   * perdía, el invitado seguía en la arena para siempre mientras los demás ya
+   * jugaban en el mapa (2-11-2026). Ahora, si el anfitrión dice que esta arena (u
+   * otra posterior) ya acabó, se acaba también aquí. Con un anfitrión de antes, la
+   * arena no trae número y no se hace nada.
+   */
+  function netApply(ar) {
+    if (!arena || arena.phase !== 'fight' || typeof arena.n !== 'number' || !Array.isArray(ar)) return;
+    const n = ar[0], st = ar[1];
+    if (n === arena.n && st === 2) won();
+    else if ((n === arena.n && st === 3) || n > arena.n) lost();
+  }
+
   return {
-    reset, update, drawable, onEvent, leftBehind, enterRequest() { if (!arena) start(); },
+    reset, update, drawable, onEvent, netState, netApply, leftBehind, enterRequest() { if (!arena) start(); },
     get rift() { return rift; }, get arena() { return arena; },
     get inArena() { return !!arena; },
     get timeLeft() { return arena ? Math.max(0, ARENA_TIME - arena.t) : 0; },
