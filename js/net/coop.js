@@ -306,7 +306,9 @@ G.Coop = (() => {
     if (!force && !outEv.length && performance.now() < flushAt) return;
     // Con la conexión atascada o cortada se espera (los eventos siguen en outEv); el 'bye' sale igual.
     if (force !== 'bye' && !canSend(hostUid)) return;
-    // Tras una espera puede haber muchos: un mensaje enorme no saldría.
+    // Tras una espera puede haber muchos: un mensaje enorme no saldría. Al irse
+    // ('bye', el último de la cola) sólo importa que llegue el aviso: van los últimos.
+    if (force === 'bye' && outEv.length > EV_MAX) outEv = outEv.slice(-EV_MAX);
     const ev = outEv.length > EV_MAX ? outEv.splice(0, EV_MAX) : outEv;
     if (ev === outEv) outEv = [];
     G.Net.toHost({ k: 'f', p: myState(), ev, h: myHold ? 1 : 0, w: doneSeq });
@@ -429,9 +431,12 @@ G.Coop = (() => {
       const prev = m.pl.net, now = performance.now(), dt = (now - m.posAt) / 1000;
       m.state = msg.p; m.pl.net = readState(msg.p); m.xpMul = m.pl.net.xpMul || 1; reconcile(from, m.pl.net);
       // Su velocidad (para centerOf), suavizada: llegan unas 15 posiciones por segundo.
-      if (prev && m.posAt && dt > 0.02 && dt < 1) {
-        m.vx += (G.U.clamp((m.pl.net.x - prev.x) / dt, -900, 900) - m.vx) * 0.5;
-        m.vy += (G.U.clamp((m.pl.net.y - prev.y) / dt, -900, 900) - m.vy) * 0.5;
+      // Dos casi a la vez (llegan juntas, más aún por el servidor): se deja la que había.
+      if (prev && m.posAt && dt < 1) {
+        if (dt > 0.02) {
+          m.vx += (G.U.clamp((m.pl.net.x - prev.x) / dt, -900, 900) - m.vx) * 0.5;
+          m.vy += (G.U.clamp((m.pl.net.y - prev.y) / dt, -900, 900) - m.vy) * 0.5;
+        }
       } else { m.vx = 0; m.vy = 0; }
       m.posAt = now;
     }

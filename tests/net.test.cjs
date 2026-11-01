@@ -1045,20 +1045,27 @@ test('relay + coop: while the guest is away (or our socket is down) events wait,
   assert.deepEqual(g.said, want, 'none lost, none repeated');
 });
 
-test('relay: load is what the guest has not acked yet on the server path, and busy follows it', async () => {
+test('relay: load is what the guest has not acked yet on the server path (but the last 10), and busy is all of it past 64 KB', async () => {
   const { w, host, guest } = await relayPair({ direct: false });
   await w.clk.advance(6000);
   assert.equal(host.N.load('g'), 0);
   for (let i = 0; i < 5; i++) host.N.send('g', numbered(i));
   await settle();                                       // llega la primera confirmación
   assert.equal(host.N.load('g'), 0, 'all acked');
+  // Con las confirmaciones llegando como siempre (cada 5), los frames grandes no cuentan.
+  for (let i = 0; i < 40; i++) {
+    host.N.send('g', frame(600, 400, i)); await settle();
+    assert.ok(host.N.load('g') < 16 * 1024, 'a healthy server path is not loaded');
+  }
+  await w.clk.advance(1000);
   w.holdAcks = true;
-  let total = 0;
-  for (let i = 0; total < 3 * 64 * 1024; i++) {          // (lo guardado tiene tope: 4 x 64 KB)
+  const sizes = [];
+  for (let i = 0; sizes.reduce((a, b) => a + b, 0) < 3 * 64 * 1024; i++) {   // (lo guardado tiene tope: 4 x 64 KB)
     host.N.send('g', frame(600, 400, i));
     const b = w.log.at(-1)[4];
-    total += typeof b === 'string' ? Buffer.byteLength(b) : b.byteLength;
-    assert.equal(host.N.load('g'), total, 'counts what is not acked');
+    sizes.push(typeof b === 'string' ? Buffer.byteLength(b) : b.byteLength);
+    const total = sizes.reduce((a, b) => a + b, 0);
+    assert.equal(host.N.load('g'), sizes.slice(0, -10).reduce((a, b) => a + b, 0), 'counts what is not acked, but the last 10');
     assert.equal(host.N.busy('g'), total > 64 * 1024);
   }
   await settle(); await w.clk.advance(1000);
@@ -1071,4 +1078,28 @@ test('relay: load is what the guest has not acked yet on the server path, and bu
   other.w.dropAcks = true;
   for (let i = 0; i < 30; i++) other.host.N.send('g', frame(600, 400, i));
   assert.equal(other.host.N.load('g'), 0, 'with no acks ever, nothing counts (busy never sticks)');
+});
+
+test('relay: a guest that is away stays away when the host rebuilds the pair, and what was sent meanwhile goes again', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  host.relay.fire('peer', 'g', 'away');
+  host.N.setLanIp('192.168.1.20'); await settle();      // rehace la pareja
+  assert.equal(host.N.mode('g'), 'away');
+  assert.equal(host.N.ready('g'), false);
+  w.holdM = true; host.N.send('g', numbered(1)); w.heldM.length = 0;   // el servidor lo tira
+  w.holdM = false;
+  host.relay.fire('peer', 'g', 'online'); await settle();
+  assert.deepEqual(guest.got.map(([, m]) => tOf(m)), [1]);
+});
+
+test('co-op: leaving with a big backlog still tells the host ("bye" is never cut off)', () => {
+  const g = coopJam(false);
+  g.G.Coop.tick(1); g.sent.length = 0;
+  g.jam(true);
+  for (let i = 0; i < 700; i++) g.G.Coop.status({ id: i }, 'b', 1);
+  g.G.Coop.leave();
+  assert.equal(g.sent.length, 1);
+  assert.ok(g.sent[0].ev.length <= 500);
+  assert.deepEqual(g.sent[0].ev.at(-1), ['bye']);
 });

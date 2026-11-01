@@ -64,6 +64,8 @@ G.Net = (() => {
   // Con ?relay: espera del canal directo si el servidor no dice otra cosa
   // (room.directWaitMs), y cada cuánto confirma el invitado lo que le llega por él.
   const RELAY_WAIT = 6000, SAME_NET_WAIT = 10 / 6, ACK_EVERY = 5, ACK_MS = 1000;
+  // load() por el servidor: los últimos mandados que aún no se esperan confirmados.
+  const LOAD_SKIP = 2 * ACK_EVERY;
   // Lo que se guarda para repetir por el servidor: los últimos BUSY_BYTES; el
   // anfitrión, por el servidor, hasta que el invitado lo confirme (con tope).
   const KEEP_MAX = 4 * BUSY_BYTES;
@@ -300,9 +302,15 @@ G.Net = (() => {
 
   function pairOf(u) {
     let s = pairs.get(u);
-    if (!s) pairs.set(u, s = { out: 0, inSeen: 0, ahead: new Set(), top: 0, acked: 0, ackSeen: false, unacked: [], bytes: 0, ackN: 0, ackT: 0 });
+    if (!s) pairs.set(u, s = { out: 0, inSeen: 0, ahead: new Set(), top: 0, acked: 0, ackSeen: false, unacked: [], bytes: 0, ackN: 0, ackT: 0, away: false });
     return s;
   }
+
+  /*
+   * ¿Está caído para el servidor ('away')? Se apunta en la pareja, que dura aunque se
+   * rehaga la conexión (setLanIp, una oferta nueva): un peer nuevo nace con lo que había.
+   */
+  const awayOf = u => { const s = pairs.get(u); return !!(s && s.away); };
 
   function forgetPair(u) {
     const s = pairs.get(u);
@@ -423,9 +431,9 @@ G.Net = (() => {
     const p = peers.get(u);
     if (!p) return;
     if (state === 'gone') { drop(u); return; }
-    const away = state === 'away';
-    if (away === !!p.away) return;
-    p.away = away;
+    const away = state === 'away', s = pairOf(u);
+    if (away === s.away) return;
+    s.away = p.away = away;
     emitPeer(u);
     // De vuelta por el servidor: lo que se mandó mientras no estaba, otra vez.
     if (!away && viaServer(p)) resend(u);
@@ -528,7 +536,7 @@ G.Net = (() => {
 
   /** `withTurn`: intento con TURN (el de cualquiera de los dos; turnIce son los nuestros, si los hay). */
   function newPeer(u, turnIce, withTurn) {
-    const p = { pc: null, dc: null, mode: 'connecting', timer: 0, viaTurn: false, turn: !!(withTurn || (turnIce && turnIce.length)) };
+    const p = { pc: null, dc: null, mode: 'connecting', timer: 0, viaTurn: false, turn: !!(withTurn || (turnIce && turnIce.length)), away: awayOf(u) };
     peers.set(u, p);
     // Sin WebRTC (navegador antiguo o bloqueado): directamente por el relé.
     let pc;
@@ -646,14 +654,14 @@ G.Net = (() => {
     if (!roomId || peers.has(u)) return;
     // Con ?relay: sin TURN, y sin WebRTC si esta pareja va sólo por el servidor.
     if (relayOn && serverOnly(u)) {
-      peers.set(u, { pc: null, dc: null, mode: 'connecting', timer: 0 });
+      peers.set(u, { pc: null, dc: null, mode: 'connecting', timer: 0, away: awayOf(u) });
       useRelay(u);
       return;
     }
     // Aún no está en la foto de la sala del servidor: no se sabe si esconde su IP. Se
     // espera a que salga (onRelayRoom); si no sale a tiempo, por el servidor.
     if (relayOn && !member(u)) {
-      const p = { pc: null, dc: null, mode: 'connecting', timer: 0, waiting: true };
+      const p = { pc: null, dc: null, mode: 'connecting', timer: 0, waiting: true, away: awayOf(u) };
       peers.set(u, p);
       p.timer = setTimeout(() => { if (peers.get(u) === p && p.mode === 'connecting') useRelay(u); }, directWait(u));
       emitPeer(u);
@@ -823,13 +831,26 @@ G.Net = (() => {
   /**
    * Bytes que le quedan por salir: lo que espera en el canal directo o, con ?relay
    * y por el servidor, lo mandado al invitado y aún sin confirmar (0 si no llegan
-   * confirmaciones, ver busy).
+   * confirmaciones). Por el servidor no cuentan los LOAD_SKIP últimos: el invitado
+   * confirma cada ACK_EVERY y hay que sumar el viaje de ida y vuelta, así que eso
+   * siempre está sin confirmar aunque la conexión vaya bien (con frames grandes
+   * pasaba de los 16 KB de coop.js y los enemigos lejanos no salían nunca).
    */
   function load(u) {
     const p = peers.get(u);
     if (p && p.dc && p.dc.readyState === 'open') return p.dc.bufferedAmount;
     const st = relayOn && isHost && pairs.get(u);
-    return st && st.ackSeen ? st.bytes : 0;
+    if (!st || !st.ackSeen) return 0;
+    let b = st.bytes;
+    for (let i = st.unacked.length - 1, k = 0; i >= 0 && k < LOAD_SKIP; i--, k++) b -= st.unacked[i][1];
+    return b;
+  }
+
+  function busy(u) {
+    const p = peers.get(u);
+    if (p && p.dc && p.dc.readyState === 'open') return p.dc.bufferedAmount > BUSY_BYTES;
+    const st = relayOn && isHost && pairs.get(u);
+    return !!(st && st.ackSeen && st.bytes > BUSY_BYTES);
   }
 
   return {
@@ -856,7 +877,7 @@ G.Net = (() => {
      * Con ?relay, por el servidor: lo mandado al invitado y aún sin confirmar (sólo
      * si llegan confirmaciones: un servidor que no las reenvía no lo atasca).
      */
-    busy(u) { return load(u) > BUSY_BYTES; },
+    busy,
     ready,
     load,
     peers() { return [...peers.keys()]; },
