@@ -1,5 +1,11 @@
 # Binary multiplayer frames, version 1
 
+> **Current protocol:** the HTTP API and the socket events (signaling, the
+> server path, sequence numbers and acks) are in
+> [relay-coop/02-protocol.md](relay-coop/02-protocol.md). This file only
+> describes the binary frame codec (`G.NetCodec`). Its notes on Firebase
+> signaling and the RTDB relay are history: both are gone.
+
 Based on main `803125dfdf3066fe6cf65f490f1e7b577871a295`.
 This change reduces application payload bytes, not message frequency. The
 existing reliable, ordered WebRTC data channel and 15 Hz direct update rate

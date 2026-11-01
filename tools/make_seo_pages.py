@@ -5,10 +5,15 @@
 #   es: guia/ pokedex/ legendarios/ shinies/ tipos/ movimientos/ objetos/ logros/ novedades/
 #   en: en/ (el juego en inglés) en/guide/ en/pokedex/ en/legendaries/ ... en/news/
 #   404.html, robots.txt, sitemap.xml (con las versiones de cada idioma)
+# La dirección pública sale de SITE_URL (como en tools/build.js):
+#   SITE_URL=https://tu.web python tools/make_seo_pages.py   (sin ella, http://localhost:8787)
 import json, os, re, datetime, html
 
 ROOT = os.path.join(os.path.dirname(__file__), '..')
-SITE = 'https://pokesurvivor.com/'
+SITE = (os.environ.get('SITE_URL') or 'http://localhost:8787').strip().rstrip('/') + '/'
+if not re.match(r'^https?://[^\s"\'<>\\/]+/$', SITE): raise SystemExit('SITE_URL no vale (ej. https://tu.web): ' + SITE)
+HOST = SITE.split('://', 1)[1].rstrip('/')
+if not os.environ.get('SITE_URL'): print('[aviso] sin SITE_URL: la web del juego será ' + SITE + ' (para publicar: SITE_URL=https://tu.web python tools/make_seo_pages.py)')
 TODAY = datetime.date.today().isoformat()
 D = json.load(open(os.path.join(ROOT, 'tools', 'cache', 'gamedata.json'), encoding='utf-8'))
 DEX = D['dex']; BY = {p['dex']: p for p in DEX}
@@ -79,13 +84,13 @@ def page(pid, lang, title, desc, body, ld=None):
              'GAME FREAK ni The Pokémon Company; Pokémon y sus personajes son propiedad de sus respectivos dueños. Sprites de PMD SpriteCollab '
              '(CC BY-NC 4.0) · datos de PokéAPI · música y sonidos originales. No tiene ninguna criptomoneda ni token oficial: '
              'cualquiera que use su nombre es de terceros y no nos hacemos cargo de compras ni inversiones. '
-             '<b>La única web oficial es pokesurvivor.com</b> y el juego es y será gratis: si alguien te pide pagar, no somos nosotros. '
+             f'<b>La única web oficial es {esc(HOST)}</b> y el juego es y será gratis: si alguien te pide pagar, no somos nosotros. '
              'Código bajo PolyForm Noncommercial 1.0.0 (hasta el 14-10-2026, MIT).') if lang == 'es' else (
              'PokéSurvivor is a <b>free, non-profit</b> fan game with no ads or purchases (only voluntary donations for the servers). It is not affiliated with Nintendo, Creatures, GAME FREAK '
              'or The Pokémon Company; Pokémon and its characters are owned by their respective owners. Sprites from PMD SpriteCollab (CC BY-NC 4.0) '
              '· data from PokéAPI · original music and sounds. It has no official cryptocurrency or token: any using its name '
              'belongs to third parties and we take no responsibility for purchases or investments. '
-             '<b>The only official website is pokesurvivor.com</b> and the game is and always will be free: if anyone asks you to pay, it isn\'t us. '
+             f'<b>The only official website is {esc(HOST)}</b> and the game is and always will be free: if anyone asks you to pay, it isn\'t us. '
              'Code under PolyForm Noncommercial 1.0.0 (MIT up to 14-10-2026).')
     ldj = ('<script type="application/ld+json">\n' + json.dumps(ld, ensure_ascii=False) + '\n</script>') if ld else ''
     return f'''<!doctype html>
@@ -594,9 +599,9 @@ def game_en():
         ('<title>PokéSurvivor – Juego Pokémon gratis online estilo Survivor.io</title>', '<title>PokéSurvivor – Free online Pokémon survival game (Survivor.io style)</title>'),
         ('content="Sobrevive a hordas de Pokémon con tu compañero en este fan game gratis para navegador y móvil: 966 Pokémon, shinies, legendarios y cooperativo con amigos. Sin descargas ni anuncios."',
          f'content="Survive hordes of Pokémon with your partner in this free fan game for browser and mobile: {N} Pokémon, shinies, legendaries and online co-op with friends. No downloads, no ads."'),
-        ('<link rel="canonical" href="https://pokesurvivor.com/">', '<link rel="canonical" href="https://pokesurvivor.com/en/">'),
+        ('<link rel="canonical" href="./">', f'<link rel="canonical" href="{SITE}en/">'),
         ('<meta property="og:locale" content="es_ES">', '<meta property="og:locale" content="en_US">'),
-        ('<meta property="og:url" content="https://pokesurvivor.com/">', '<meta property="og:url" content="https://pokesurvivor.com/en/">'),
+        ('<meta property="og:url" content="./">', f'<meta property="og:url" content="{SITE}en/">'),
         ('<meta property="og:title" content="PokéSurvivor – Sobrevive a las hordas Pokémon">', '<meta property="og:title" content="PokéSurvivor – Survive the Pokémon hordes">'),
         ('<meta property="og:description" content="Fan game gratis para navegador y móvil: 966 Pokémon, shinies, legendarios y cooperativo hasta 4 amigos. Sin descargas ni anuncios.">',
          f'<meta property="og:description" content="A free fan game for browser and mobile: {N} Pokémon, shinies, legendaries and co-op with up to 4 friends. No downloads, no ads.">'),
@@ -609,6 +614,9 @@ def game_en():
     for a, b in rep:
         assert a in s, a[:60]
         s = s.replace(a, b)
+    # SITE_URL, como en tools/build.js: lo demás de "./" (imagen, datos estructurados) y ps-site.
+    assert '<meta name="ps-site" content="./">' in s
+    s = s.replace('"./', f'"{SITE}')
     # Enlaces a las páginas: las de inglés.
     s = s.replace('href="guia/"', 'href="en/guide/"').replace('href="pokedex/"', 'href="en/pokedex/"')
     s = s.replace('"description": "Fan game gratuito de supervivencia (bullet heaven, estilo Survivor.io) con Pokémon: elige compañero, sobrevive a hordas, sube de nivel, evoluciona tus ataques, enfréntate a legendarios en grietas y juega en cooperativo con hasta 4 amigos."',

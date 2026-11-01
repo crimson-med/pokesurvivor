@@ -5,8 +5,7 @@ videos/
 tools/cache/
 __pycache__/
 
-# Firebase / emulador / logs
-.firebase/
+# Logs
 *-debug.log
 *.log
 node_modules/

@@ -64,9 +64,12 @@ for (const [i, lang] of langs.entries()) {
     b.ctx.document.createElement = () => ({});
     b.load('js/ui/login.js');
     assert.equal(b.G.LoginUI.updateNotices(), true);
-    // El aviso del dueño, entero y con sus negritas: "cada 10 minutos" en todos los idiomas.
+    // El aviso del dueño, entero y con sus negritas: se sube "como mucho 10 segundos después
+    // de cada cambio" en todos los idiomas (ya no "cada 10 minutos").
     const body = node('savenote-body');
     assert.ok(body.innerHTML.includes('10') && !body.innerHTML.includes('30'));
+    assert.ok(body.innerHTML.includes(['10 segundos', '10 seconds', '10 secondes', '10 secondi', '10 segundos', '10 秒', '10 秒'][i]), lang);
+    assert.ok(!/minut|分钟|分鐘/.test(body.innerHTML), lang);
     assert.equal((body.innerHTML.match(/<b[ >]/g) || []).length, 3);
     if (lang !== 'es') assert.ok(!body.innerHTML.includes('Debido a problemas'));
     if (lang !== 'es' && lang !== 'en') assert.ok(!body.innerHTML.includes('Because of problems') && body.attrs.translate === 'no');

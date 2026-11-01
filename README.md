@@ -90,13 +90,17 @@ jefe, la captura de un shiny salvaje y un shiny en el gacha.
 
 ## Guardado en la nube y publicación
 
-- **Base de datos (Firebase):** cuentas con nombre + contraseña o Google, y la
-  partida se sigue en cualquier ordenador.
-  Sin configurar, el juego guarda sólo en el navegador, como antes.
+- **Servidor propio (`server/`):** cuentas con un código por correo o como
+  invitado, y la partida se sigue en cualquier aparato. Un proceso de Node,
+  una imagen de Docker y un archivo de SQLite: ver
+  [docs/relay-coop/README.md](docs/relay-coop/README.md).
+  Abierto con doble clic (sin servidor), el juego guarda sólo en el navegador.
 - **Jugar con amigos (hasta 4) y ranking:** con cuenta en la nube, menú
   **Amigos** (añadir por apodo, invitar a tu sala) y **Ranking** (tiempo
   aguantado: solo o grupo, de hoy a histórico, amigos, por Pokémon).
-- **Publicar gratis en GitHub Pages:** [docs/PUBLICAR.md](docs/PUBLICAR.md).
+- **Publicar:** [docs/relay-coop/13-step-9-deploy.md](docs/relay-coop/13-step-9-deploy.md).
+  La dirección pública (`SITE_URL`) la ponen `tools/build.js` y
+  `tools/make_seo_pages.py` al construir.
 - Si se juega en dos ordenadores a la vez o sin conexión, las partidas se
   **fusionan**: las colecciones se unen (nunca se pierde un Pokémon ni un
   shiny), mejoras y estadísticas se quedan con el máximo, y monedas y

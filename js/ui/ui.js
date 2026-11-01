@@ -139,6 +139,7 @@ G.UI = (() => {
   const REPO = 'https://github.com/JPTER78/pokesurvivor';
 
   function openLegal() {
+    $('legal-official').textContent = G.I18n.f('La única web oficial de PokéSurvivor es {x}. El juego es y será gratis: si alguien te pide pagar, no somos nosotros.', G.siteHost());
     $('legal-mail').textContent = CONTACT;
     $('legal-mail').href = 'mailto:' + CONTACT + '?subject=Pok%C3%A9Survivor';
     $('legal-repo').textContent = REPO.replace('https://', '');

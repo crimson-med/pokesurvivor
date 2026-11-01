@@ -21,7 +21,7 @@
  *     Al juntar dos copias se FUSIONAN (G.SaveMerge.merge, js/core/save-merge.js):
  *     las colecciones se unen y nunca se pierde un Pokémon ni un shiny.
  *     Partidas de antes en este navegador (ps.save.* del modo local, o
- *     ps.cloud.* del juego original con Firebase): se ofrece una vez añadirlas
+ *     ps.cloud.* de las cuentas del juego original): se ofrece una vez añadirlas
  *     a la cuenta (importable, importOld; ps.import.no si dice que no,
  *     ps.import.done si ya se añadieron).
  *
@@ -611,7 +611,7 @@ G.DB = (() => {
 
   /*
    * Partidas de antes en este navegador: las del modo local (ps.save.<nombre>)
-   * y las del juego original con Firebase (ps.cloud.<uid de Firebase>). Las
+   * y las de las cuentas del juego original (ps.cloud.<uid de aquella cuenta>). Las
    * ps.cloud.* de las cuentas de este servidor no cuentan: están en ps.uids o
    * tienen la forma de sus uid (22 letras, base64url).
    */
@@ -973,8 +973,6 @@ G.DB = (() => {
     get importable() { return importable(); },
     onSync(fn) { listeners.add(fn); },
     onLeave(fn) { leaveHooks.push(fn); },
-    /** Firebase ya no se usa (paso 2): los módulos de red que aún lo leen se quedan sin nube. */
-    fb: null,
     /** La cuenta del servidor ({ uid, kind, name, email, admin }) o null (modo local, sin sesión). */
     get me() { return mode === 'cloud' ? me : null; },
     /** ¿Está disponible lo online? Sesión en el servidor y el servidor ha contestado (también invitados). */

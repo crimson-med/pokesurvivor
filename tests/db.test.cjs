@@ -118,7 +118,7 @@ test('sin sesión: modo nube, a la pantalla de entrar', async () => {
   assert.equal(t.DB.mode, 'cloud');
   assert.equal(t.DB.online, false);
   assert.equal(t.DB.me, null);
-  assert.equal(t.DB.fb, null);
+  assert.ok(!('fb' in t.DB), 'sin la base de datos del juego original');
   assert.deepEqual(srv.calls.map(c => c[1]), ['/api/me']);
 });
 
@@ -451,7 +451,7 @@ test('un fallo que no se arregla solo (413): no se reintenta en cada guardado, s
   assert.equal(t.DB.syncState, 'ok');
 });
 
-// Partidas de antes en un navegador: una del modo local y una del juego original (uid de Firebase).
+// Partidas de antes en un navegador: una del modo local y una de una cuenta del juego original.
 const FB_UID = 'aB3dE5gH7jK9mN1pQ3sT5vX7yZ9b';
 function oldBrowser() {
   const b = newBrowser();

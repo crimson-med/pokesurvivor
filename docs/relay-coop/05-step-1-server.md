@@ -91,6 +91,7 @@ builds into one Docker image. No accounts yet (step 2).
 - `cd server && npm test` passes.
 - `MAIL=console npm run dev`, open `http://localhost:8787`: the game loads and
   plays solo (still in local mode until step 2).
-- `docker build -f server/Dockerfile -t ps . && docker run -p 8787:8787 -v ps-data:/data ps` serves
-  the built game.
+- `docker build -f server/Dockerfile -t ps . && docker run -p 8787:8787 -v ps-data:/data -e CODE_PEPPER=<a long random secret> ps`
+  serves the built game. The image runs with `NODE_ENV=production`, so it
+  refuses to start without `CODE_PEPPER`.
 - `node --test tests/*.test.cjs` passes.

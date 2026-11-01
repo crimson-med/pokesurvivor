@@ -19,6 +19,8 @@ const FROM = +arg('from', 0), TO = arg('to', null), EVERY = +arg('every', 1);
 const SMALL = process.argv.includes('--small');
 const DIRECTOR = arg('director', 'director.js');      // el guion (director-sentencia.js: el del 23-10-2026)
 const OUT = path.resolve(arg('out', path.join(os.tmpdir(), 'ps-trailer')));
+// La web que sale al final del tráiler: la de SITE_URL (como en tools/build.js).
+const SITE_HOST = new URL(process.env.SITE_URL || 'http://localhost:8787').host;
 const DIR = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(\w:)/, '$1'));
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const PORT = 9333;
@@ -69,6 +71,7 @@ try {
   await send('Page.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: SMALL ? 0.5 : 1.5, mobile: false });
   const src = f => fs.readFileSync(path.join(DIR, f), 'utf8');
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__siteHost = ${JSON.stringify(SITE_HOST)};` });
   await send('Page.addScriptToEvaluateOnNewDocument', { source: src('shim.js') });
   await send('Page.addScriptToEvaluateOnNewDocument', { source: src(DIRECTOR) });
   await send('Page.addScriptToEvaluateOnNewDocument', { source: src('score.js') });

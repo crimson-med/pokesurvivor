@@ -476,11 +476,13 @@ function relayWorld({ mode = 'direct', directWaitMs = 6000, direct = true, membe
   const w = { clk, pcs, log, direct, stun: ['stun:stun.example:3478'], configAsks: 0, holdAcks: false, heldAcks: [], dropAcks: false, holdM: false, heldM: [],
     room: { code: [1, 2, 3, 4], state: 'lobby', mode, host: 'host', directWaitMs, members: [] } };
   const deliver = (to, ev, ...args) => Promise.resolve().then(() => { const n = nodes.get(to); if (n) n.fire(ev, ...args); });
-  w.releaseAcks = () => { for (const [from, seq] of w.heldAcks.splice(0)) nodes.get('host').fire('ack', from, seq); };
+  w.releaseAcks = () => { for (const [from, seq, ep] of w.heldAcks.splice(0)) nodes.get('host').fire('ack', from, seq, ep); };
   w.releaseM = () => { for (const a of w.heldM.splice(0)) deliver(...a); };
   function fakeRelay(uid) {
     const fns = new Map();
-    return { enabled: true, state: 'online', uid, get room() { return w.room; }, connect() {}, request: async () => ({ ok: true }),
+    // ep: el de esta página (el de su fila en la foto al crearla; w.reload le da otro).
+    const me = w.room.members.find(x => x.uid === uid), ep = me ? me.ep : null;
+    return { enabled: true, state: 'online', uid, ep, get room() { return w.room; }, connect() {}, request: async () => ({ ok: true }),
       on(ev, fn) { if (!fns.has(ev)) fns.set(ev, new Set()); fns.get(ev).add(fn); },
       off(ev, fn) { if (fns.has(ev)) fns.get(ev).delete(fn); },
       fire(ev, ...args) { for (const fn of [...(fns.get(ev) || [])]) fn(...args); },
@@ -489,10 +491,10 @@ function relayWorld({ mode = 'direct', directWaitMs = 6000, direct = true, membe
         if (this.dead) return;                   // (una página que ya se recargó)
         log.push([uid, ev, ...args]);
         if (ev === 'sig') deliver(args[0], 'sig', uid, JSON.parse(JSON.stringify(args[1])));
-        else if (ev === 'm') { if (w.holdM) w.heldM.push([args[0], 'm', uid, args[1], args[2]]); else deliver(args[0], 'm', uid, args[1], args[2]); }
+        else if (ev === 'm') { if (w.holdM) w.heldM.push([args[0], 'm', uid, args[1], args[2], args[3]]); else deliver(args[0], 'm', uid, args[1], args[2], args[3]); }
         else if (ev === 'ack') {
           if (w.dropAcks) return;
-          if (w.holdAcks) w.heldAcks.push([uid, args[0]]); else deliver('host', 'ack', uid, args[0]);
+          if (w.holdAcks) w.heldAcks.push([uid, args[0], args[1]]); else deliver('host', 'ack', uid, args[0], args[1]);
         } else if (ev === 'path') {
           const m = w.room.members.find(x => x.uid === args[0]);
           if (m && m.path !== args[1]) { m.path = args[1]; for (const u of nodes.keys()) deliver(u, 'room', w.room); }
@@ -989,6 +991,58 @@ test('reload: a guest that reloads within the away window starts a fresh numberi
   host.relay.fire('room', w.room); await settle();
   host.N.send('g', numbered(401)); await settle();
   assert.deepEqual(g2.got.map(([, m]) => tOf(m)), [400, 401]);
+});
+
+test('reload: early in a run (old numbers below 256) what was numbered for the old page is dropped too', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  for (let i = 1; i <= 20; i++) host.N.send('g', numbered(i));
+  await settle();
+  assert.equal(guest.got.length, 20);
+  // Recarga a los pocos segundos: lo que va de camino lleva números bajos (21..25).
+  w.holdM = true;
+  for (let i = 21; i <= 25; i++) host.N.send('g', numbered(i));
+  assert.ok(w.heldM.every(a => a[5] === 'g-1'), 'each m carries the ep of the page it was numbered for');
+  host.relay.fire('peer', 'g', 'away');
+  const g2 = w.reload('g');
+  g2.N.open('room', false, 'host');
+  await settle();
+  const atRelease = w.log.length;
+  w.holdM = false; w.releaseM(); await w.clk.advance(1000);
+  assert.deepEqual(g2.got, [], 'nothing from the old numbering, whatever its number');
+  assert.ok(!w.log.slice(atRelease).some(e => e[0] === 'g' && e[1] === 'ack'), 'and nothing of it acked');
+  host.relay.fire('peer', 'g', 'online'); await settle();
+  // Lo nuevo del anfitrión empieza en el 1, para la página nueva, y llega.
+  const from = w.log.length;
+  host.N.send('g', numbered(30)); host.N.send('g', numbered(31)); await settle();
+  assert.deepEqual(w.log.slice(from).filter(e => e[0] === 'host' && e[1] === 'm').map(e => [e[3], e[5]]), [[1, 'g-2'], [2, 'g-2']]);
+  assert.deepEqual(g2.got.map(([, m]) => tOf(m)), [30, 31]);
+});
+
+test('reload: an ack for the old host page does not drop what the new page still has to resend', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  for (let i = 1; i <= 5; i++) host.N.send('g', numbered(i));
+  await settle();
+  // La confirmación del invitado, aún para la página de antes del anfitrión, va de camino.
+  w.holdAcks = true;
+  for (let i = 6; i <= 8; i++) host.N.send('g', numbered(i));
+  await settle(); await w.clk.advance(1000);
+  assert.deepEqual(w.heldAcks.map(a => [a[1], a[2]]), [[8, 'host-1']], 'each ack carries the ep of the host page it is for');
+  const h2 = w.reload('host'); await settle();
+  h2.N.open('room', true, 'host'); h2.N.syncMembers(['host', 'g']); await w.clk.advance(6000);
+  // La página nueva manda 1..8 por el servidor y no llegan (se pierden).
+  w.holdM = true;
+  for (let i = 1; i <= 8; i++) h2.N.send('g', numbered(100 + i));
+  w.heldM.length = 0; w.holdM = false;
+  w.holdAcks = false; w.releaseAcks(); await settle();
+  // El invitado se cae un momento y vuelve: se le repite todo lo que no ha confirmado.
+  h2.relay.fire('peer', 'g', 'away'); await settle();
+  const from = w.log.length;
+  h2.relay.fire('peer', 'g', 'online'); await settle();
+  assert.deepEqual(w.log.slice(from).filter(e => e[0] === 'host' && e[1] === 'm').map(e => e[3]), [1, 2, 3, 4, 5, 6, 7, 8],
+    'the stale ack(8) trimmed nothing');
+  assert.ok(guest.N.mode('host') !== 'closed');
 });
 
 test('reload: the host reloading makes the guest start over with it too, and redo the connection', async () => {

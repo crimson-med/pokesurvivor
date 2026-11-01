@@ -189,9 +189,9 @@ G.LoginUI = (() => {
   const NOTES = [
     { key: 'ps.savenote.1', when: cloud,              // botón Guardar (18-10-2026)
       title: ['Importante: guarda tu partida', 'Important: save your game'],
-      body: ['<p>Debido a problemas con el guardado, a partir de ahora la partida se guarda en la nube automáticamente <b>cada 10 minutos</b>.</p>' +
+      body: ['<p>Debido a problemas con el guardado, a partir de ahora la partida se guarda en la nube automáticamente <b>como mucho 10 segundos después de cada cambio</b>.</p>' +
              '<p>Hemos incorporado un botón <b class="gold">Guardar</b> arriba a la derecha. Úsalo antes de cerrar el juego o de cambiar de aparato: <b>es muy importante para no perder tu partida</b>.</p>',
-             '<p>Because of problems with saving, from now on your game is saved to the cloud automatically <b>every 10 minutes</b>.</p>' +
+             '<p>Because of problems with saving, from now on your game is saved to the cloud automatically <b>within 10 seconds of each change</b>.</p>' +
              '<p>We have added a <b class="gold">Save</b> button at the top right. Use it before closing the game or switching devices: <b>it is very important so you don’t lose your progress</b>.</p>'] },
     { key: 'ps.ranknote.1', when: () => cloud() && ((G.DB.save.stats || {}).runs || 0) > 0,   // rankings desde cero (18-10-2026)
       title: ['Los rankings se han reiniciado', 'The leaderboards have been reset'],
@@ -270,7 +270,7 @@ G.LoginUI = (() => {
     const why = G.DB.localReason === 'file'
       ? 'Abierto desde un archivo: la partida sólo se guarda en este navegador. Para guardar en la nube, juega en la versión publicada.'
       : G.DB.localReason === 'dev'
-        ? 'Versión de pruebas: la partida sólo se guarda en este navegador. El juego de verdad está en pokesurvivor.com.'
+        ? 'Versión de pruebas: la partida sólo se guarda en este navegador. El juego de verdad es la versión publicada (index.html).'
       : G.DB.localReason === 'config'
         ? 'Nube sin configurar: la partida sólo se guarda en este navegador.'
         : 'No se pudo conectar con la nube: la partida sólo se guarda en este navegador.';
@@ -293,6 +293,7 @@ G.LoginUI = (() => {
     const cloud = G.DB.mode === 'cloud', add = !!opts.add && cloud;
     G.UI.chrome(false);
     G.UI.show('scr-login');
+    $('login-official').textContent = G.I18n.f('Web oficial: {x} · si alguien te pide pagar, no somos nosotros', G.siteHost());
     err(!G.DB.storageOk ? 'Este navegador no deja guardar datos: juega como invitado.' : '');
     $('login-local').classList.toggle('hidden', cloud);
     $('login-code').classList.add('hidden');

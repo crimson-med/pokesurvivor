@@ -71,7 +71,7 @@ test('server errors map to a text for every code', () => {
   }
   assert.equal(G.SocialUI.relayError(err('signed-out'), 'X'), 'Vuelve a iniciar sesión para jugar en grupo.');
   assert.equal(G.SocialUI.relayError(err('banned'), 'X'), 'Esta cuenta no puede jugar en grupo.');
-  // Ya no existen: sin cuenta es signed-out, y el token de Firebase se fue.
+  // Ya no existen: sin cuenta es signed-out, y el token del juego original se fue.
   for (const c of ['bad-token', 'disabled']) assert.equal(G.SocialUI.relayError(err(c), 'X'), 'X', c);
   assert.equal(G.SocialUI.relayError({ ok: false, err: 'full' }, 'X'), 'Esta sala está llena (4 jugadores).');
   assert.equal(G.SocialUI.relayError(new Error('xhr poll error'), 'X'), 'X');
@@ -116,7 +116,7 @@ test('the lobby is always the code lobby: no Same Wi-Fi tab, no join by IP, no l
   for (const f of ['findLocal', 'lanKey', 'rtdb', 'rooms/']) assert.ok(!social.includes(f), f);
   assert.ok(html.includes('id="fr-code"') && html.includes('id="lobby-hint"'), 'code screens and "Connect locally" stay');
   // (social.js aún tiene los amigos de Firestore hasta el paso 6: sólo sin salas en él.)
-  for (const f of ['js/net/net.js', 'js/net/relay.js', 'js/net/coop.js']) assert.ok(!/rooms\/|firebase|TURN/.test(source(f)), f);
+  for (const f of ['js/net/net.js', 'js/net/relay.js', 'js/net/coop.js']) assert.ok(!/rooms\/|fire[b]ase|TURN/.test(source(f)), f);
 });
 
 test('the strings of the removed screens are gone in every language, and the new ones are there', () => {
