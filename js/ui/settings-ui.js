@@ -155,14 +155,21 @@ G.SettingsUI = (() => {
         + `<button class="btn gold" id="set-login">Crear cuenta o entrar</button>`;
       return;
     }
-    const nick = G.Social.me ? G.Social.me.name : (G.DB.user || '');
-    const kind = G.DB.mode === 'local' ? 'Cuenta de este navegador' : G.DB.nameAccount ? 'Nombre y contraseña' : 'Google';
-    box.innerHTML = section('Cuenta')
-      + `<div class="set-row"><div class="grow"><b>Apodo</b><small>Es único y no se puede cambiar.</small></div><span class="gold" translate="no">${esc(nick)}</span></div>`
+    const cloud = G.DB.mode === 'cloud', me = G.DB.me;
+    const guestAcc = G.DB.guestAccount;
+    const kind = !cloud ? 'Cuenta de este navegador' : guestAcc ? 'Invitado' : 'Correo electrónico';
+    const name = G.Social.me
+      ? `<div class="set-row"><div class="grow"><b>Apodo</b><small>Es único y no se puede cambiar.</small></div><span class="gold" translate="no">${esc(G.Social.me.name)}</span></div>`
+      : `<div class="set-row"><div class="grow"><b>Nombre</b></div><span class="gold" translate="no">${esc(G.DB.user || '')}</span></div>`;
+    box.innerHTML = section('Cuenta', guestAcc ? 'Eres invitado: tu partida sólo está en este navegador. Añade un correo para no perderla y jugar desde otros aparatos.' : '')
+      + name
       + `<div class="set-row"><div class="grow"><b>Tipo de cuenta</b></div><span>${esc(kind)}</span></div>`
+      + (me && me.email ? `<div class="set-row"><div class="grow"><b>Correo</b></div><span translate="no">${esc(me.email)}</span></div>` : '')
       + `<div class="set-row"><div class="grow"><b>Partida</b></div><span>${esc(SYNC[st] || st)}</span></div>`
+      + (guestAcc ? `<button class="btn gold" id="set-add-email" style="margin-top:12px">Añadir un correo</button>` : '')
       + `<div class="row wrap" style="gap:8px;margin-top:12px">
            <button class="btn" id="set-logout">Cerrar sesión</button>
+           ${cloud && !guestAcc ? '<button class="btn" id="set-logout-all">Cerrar sesión en todas partes</button>' : ''}
            <button class="btn danger" id="set-delete">Borrar cuenta</button>
          </div><p class="note" id="set-msg"></p>`
       // Cooperativo con servidor propio (sólo con ?relay): ir siempre por el servidor.
@@ -180,12 +187,20 @@ G.SettingsUI = (() => {
     box.querySelectorAll('[data-lang]').forEach(b => { b.onclick = () => { if (b.dataset.lang !== G.I18n.lang) G.I18n.set(b.dataset.lang); }; });
     const lo = $('set-login'); if (lo) lo.onclick = () => { close(); leave(); };
     const out = $('set-logout'); if (out) out.onclick = () => { close(); leave(); };
+    const all = $('set-logout-all');
+    if (all) all.onclick = async () => {
+      if (!confirm('Se cerrará la sesión en todos los aparatos donde hayas entrado, también en este. ¿Seguro?')) return;
+      all.disabled = true;
+      const r = await leave(true);
+      if (r && !r.ok) { $('set-msg').textContent = 'No se pudo cerrar la sesión en todas partes. Vuelve a probar en un momento.'; all.disabled = false; }
+    };
+    const add = $('set-add-email'); if (add) add.onclick = () => { close(); G.LoginUI.open({ add: true }); };
     const del = $('set-delete');
     if (del) del.onclick = async () => {
       const ok = await G.UI.confirmDelete();
       if (!ok) return;
       del.disabled = true;
-      const r = await G.DB.deleteAccount(ok.pass);
+      const r = await G.DB.deleteAccount();
       if (!r.ok) { $('set-msg').textContent = r.error; del.disabled = false; return; }
       close();
       G.UI.toast('Cuenta borrada');
@@ -194,12 +209,19 @@ G.SettingsUI = (() => {
     };
   }
 
-  /** Cerrar sesión (si estás en una partida, se abandona). */
-  function leave() {
-    if (G.DB.guest && !confirm('Eres invitado: se perderá todo el progreso. ¿Salir?')) return;
+  /**
+   * Cerrar sesión (si estás en una partida, se abandona). all: en todos los
+   * aparatos. → { ok } (o undefined si se cancela)
+   */
+  async function leave(all) {
+    if (!all && (G.DB.guest || G.DB.guestAccount) && !confirm('Eres invitado: se perderá todo el progreso. ¿Salir?')) return;
     if (G.Game.state !== 'ui') G.Game.quit && G.Game.quit();
+    const r = await G.DB.logout(all);
+    if (!r.ok) return r;
+    close();
     G.Audio.music(null);
-    G.DB.logout().then(() => G.Flow.toLogin());
+    G.Flow.toLogin();
+    return r;
   }
 
   return { init, open, close, get isOpen() { return isOpen(); } };

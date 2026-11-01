@@ -474,6 +474,7 @@ G.Net = (() => {
     if (roomId === id) return;
     close();
     const fb = G.DB.fb;
+    if (!fb) return;                 // sin Firebase (desde el paso 2): sin cooperativo hasta el paso 4
     rtdb = fb.rtdb; uid = fb.uid;
     roomId = id; isHost = host; hostUid = hostId;
     relayOn = relayEnabled();

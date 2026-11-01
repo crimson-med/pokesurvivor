@@ -5,15 +5,17 @@
  *
  *   GET /healthz      { ok, rooms, sockets, paths, bytes, db }
  *   GET /api/config   { stunUrls, directWaitMs, version } (público)
- *   /api/...          un módulo por área en http/ (ROUTES), cada uno con
- *                     register(app, deps); cada paso toca sólo el suyo
+ *   /api/...          antes de nada, guard.csrf y guard.load (la sesión de la
+ *                     cookie); luego un módulo por área en http/ (ROUTES),
+ *                     cada uno con register(app, deps); cada paso toca sólo el suyo
  *   lo demás          los archivos del juego (http/static.js)
  *
  * Con SIGTERM o SIGINT: closed('server-restart') a las salas, se cierra el
  * socket, el HTTP y SQLite, y se sale.
  *
- * createServer(cfg, opts) -> { app, http, relay, store, listen(port, host), close() }
- * para las pruebas; `node index.js` lo arranca con process.env.
+ * createServer(cfg, opts) -> { app, http, relay, store, guard, listen(port, host), close() }
+ * para las pruebas (opts.store, opts.mailer, opts.limits: topes de guard.js,
+ * opts.now: el reloj de las sesiones y los códigos, opts.relay); `node index.js` lo arranca con process.env.
  */
 'use strict';
 
@@ -23,7 +25,8 @@ const http = require('http');
 const express = require('express');
 const { loadConfig } = require('./config');
 const store = require('./db');
-const guard = require('./http/guard');
+const guardMod = require('./http/guard');
+const { createMailer } = require('./mail');
 const staticFiles = require('./http/static');
 const { attach } = require('./relay/io');
 
@@ -41,8 +44,10 @@ function createServer(cfg, opts = {}) {
   app.set('trust proxy', cfg.trustProxy);
 
   const server = http.createServer(app);
-  const relay = attach(server, { cfg, ...opts.relay });
-  const deps = { cfg, db, guard, relay };
+  const guard = guardMod.create({ cfg, db, limits: opts.limits, now: opts.now });
+  const mailer = opts.mailer || createMailer(cfg);
+  const relay = attach(server, { cfg, sessionOf: guard.fromCookie, ...opts.relay });
+  const deps = { cfg, db, guard, relay, mailer, now: opts.now };
   const version = readVersion(cfg.staticDir);
 
   app.get('/healthz', (req, res) => {
@@ -56,6 +61,7 @@ function createServer(cfg, opts = {}) {
       .json({ stunUrls: cfg.stunUrls, directWaitMs: cfg.directWaitMs, version });
   });
 
+  app.use('/api', guard.csrf, guard.load);
   for (const name of ROUTES) require('./http/' + name).register(app, deps);
 
   app.use('/api', (req, res) => guard.fail(res, 404, 'not-found'));
@@ -83,12 +89,12 @@ function createServer(cfg, opts = {}) {
     if (!closing) {
       closing = relay.close()   // cierra también el http.Server
         .catch(() => {})
-        .then(() => db.close());
+        .then(() => { guard.close(); db.close(); });
     }
     return closing;
   }
 
-  return { app, http: server, relay, store: db, deps, listen, close };
+  return { app, http: server, relay, store: db, guard, deps, listen, close };
 }
 
 module.exports = { createServer, ROUTES };

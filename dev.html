@@ -101,28 +101,53 @@
     </div>
     <p class="login-tag">Sobrevive a las hordas con tu compañero Pokémon · gratis, en PC y móvil</p>
     <p class="login-official">Web oficial: pokesurvivor.com · si alguien te pide pagar, no somos nosotros</p>
-    <div class="tabs">
-      <div class="tab on" data-tab="login">Entrar</div>
-      <div class="tab" data-tab="register">Crear cuenta</div>
-    </div>
-    <form id="login-form" autocomplete="off">
-      <label for="f-user">Nombre</label>
-      <input id="f-user" class="field" maxlength="16" spellcheck="false" autocomplete="username" autocapitalize="none" autocorrect="off">
-      <label for="f-pass">Contraseña</label>
-      <input id="f-pass" class="field" type="password" maxlength="64">
-      <p id="login-err" class="err"></p>
-      <p class="note"><a href="#" id="f-forgot">¿Olvidaste tu contraseña?</a></p>
-      <p id="forgot-note" class="note hidden">Si vinculaste tu Gmail, pulsa <b>Entrar con Google</b> con ese Gmail: es tu misma cuenta.
-        Si no lo vinculaste, no se puede recuperar: crea una cuenta nueva (y esta vez vincula tu Gmail desde el aviso que sale al entrar).</p>
+    <!-- Con el servidor del juego: el correo y luego el código de 6 cifras (js/ui/login.js) -->
+    <form id="login-email" autocomplete="on" novalidate>
+      <label for="f-email">Tu correo</label>
+      <input id="f-email" class="field" type="email" maxlength="254" spellcheck="false" autocomplete="email" inputmode="email" autocapitalize="none" autocorrect="off">
+      <p class="note login-hint">Te mandamos un código de 6 cifras para entrar. Sin contraseñas.</p>
       <div class="row">
-        <button id="btn-auth" class="btn gold grow" type="submit">Entrar</button>
+        <button id="btn-send" class="btn gold grow" type="submit">Enviar código</button>
       </div>
     </form>
-    <div class="row" style="margin-top:10px">
-      <button id="btn-google" class="btn google grow hidden" type="button">Entrar con Google</button>
+    <form id="login-code" class="hidden" autocomplete="off" novalidate>
+      <p class="sub">Escribe el código que te hemos mandado a:<br><b id="code-email" translate="no"></b></p>
+      <div class="otp" id="otp">
+        <input class="field" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" aria-label="Código">
+        <input class="field" inputmode="numeric" pattern="[0-9]*" autocomplete="off" aria-label="Código">
+        <input class="field" inputmode="numeric" pattern="[0-9]*" autocomplete="off" aria-label="Código">
+        <input class="field" inputmode="numeric" pattern="[0-9]*" autocomplete="off" aria-label="Código">
+        <input class="field" inputmode="numeric" pattern="[0-9]*" autocomplete="off" aria-label="Código">
+        <input class="field" inputmode="numeric" pattern="[0-9]*" autocomplete="off" aria-label="Código">
+      </div>
+      <div class="row">
+        <button id="btn-verify" class="btn gold grow" type="submit">Entrar</button>
+      </div>
+      <div class="row login-code-links">
+        <button id="btn-resend" class="btn small ghost" type="button" disabled>Reenviar código</button>
+        <button id="btn-other" class="btn small ghost" type="button">Usar otro correo</button>
+      </div>
+    </form>
+    <!-- Abierto desde un archivo (file://): cuentas sólo de este navegador -->
+    <div id="login-local" class="hidden">
+      <div class="tabs">
+        <div class="tab on" data-tab="login">Entrar</div>
+        <div class="tab" data-tab="register">Crear cuenta</div>
+      </div>
+      <form id="login-form" autocomplete="off">
+        <label for="f-user">Nombre</label>
+        <input id="f-user" class="field" maxlength="16" spellcheck="false" autocomplete="username" autocapitalize="none" autocorrect="off">
+        <label for="f-pass">Contraseña</label>
+        <input id="f-pass" class="field" type="password" maxlength="64">
+        <div class="row" style="margin-top:12px">
+          <button id="btn-auth" class="btn gold grow" type="submit">Entrar</button>
+        </div>
+      </form>
     </div>
-    <div class="row" style="margin-top:10px">
+    <p id="login-err" class="err" role="alert"></p>
+    <div class="row" style="margin-top:6px">
       <button id="btn-guest" class="btn ghost grow" type="button">Jugar como invitado</button>
+      <button id="btn-login-back" class="btn ghost grow hidden" type="button">Volver</button>
     </div>
     <p class="note center" id="login-mode"></p>
     <p class="note center"><!-- seo:begin --><a href="guia/">Guía</a> · <a href="pokedex/">Pokédex</a> · <!-- seo:end --><a href="#" class="legal-link" data-legal>Aviso legal y privacidad</a></p>
@@ -225,20 +250,6 @@
   <div class="box news-box">
     <div class="row between"><h2>Novedades</h2><button class="btn small ghost" id="news-close">Cerrar</button></div>
     <div id="news-body" class="news-body"></div>
-  </div>
-</section>
-
-<!-- ====== Vincular Gmail para recuperar la cuenta (js/ui/login.js, offerRecovery) ====== -->
-<section id="scr-recover" class="scr dim hidden">
-  <div class="box" style="width:min(440px,100%)">
-    <h2>¿Te da miedo perder tu cuenta?</h2>
-    <p>Vincula tu Gmail: si un día olvidas la contraseña, pulsas <b>Entrar con Google</b> y es tu misma cuenta, con todo lo tuyo.</p>
-    <p class="err" id="rec-err"></p>
-    <div class="row" style="gap:8px;flex-wrap:wrap">
-      <button class="btn gold grow" id="rec-link" type="button">Vincular mi Gmail</button>
-      <button class="btn ghost" id="rec-later" type="button">Ahora no</button>
-    </div>
-    <p class="note center"><a href="#" id="rec-never">No volver a preguntar</a></p>
   </div>
 </section>
 
@@ -677,6 +688,8 @@
 <!-- núcleo -->
 <script defer src="js/core/firebase-config.js"></script>
 <script defer src="js/net/relay-config.js"></script>
+<script defer src="js/core/save-merge.js"></script>
+<script defer src="js/net/api.js"></script>
 <script defer src="js/core/db.js"></script>
 <script defer src="js/core/audio.js"></script>
 <script defer src="js/core/input.js"></script>

@@ -10,6 +10,7 @@ const { publicIp, originOk } = require('../relay/io');
 const { createRooms } = require('../relay/rooms');
 const { createLimits } = require('../relay/limits');
 const store = require('../db');
+const { sessionCookie } = require('./helpers');
 
 const ORIGIN = 'http://localhost:8000';
 const WORDS = Array.from({ length: 100 }, (_, i) => i + 1);
@@ -41,11 +42,20 @@ test.after(async () => {
   await srv.close();
 });
 
+// Una sesión por cuenta (la misma al volver a conectar), en la base de datos del servidor.
+const cookies = new Map();
+function cookieFor(uid) {
+  if (!cookies.has(uid)) cookies.set(uid, sessionCookie(srv.store, uid));
+  return cookies.get(uid);
+}
+
+// o.cookie: la cabecera Cookie (null = ninguna); si no, la de la cuenta `uid`.
 function client(uid, o = {}) {
+  const cookie = o.cookie !== undefined ? o.cookie : cookieFor(uid);
   const s = ioc(o.url || url, {
-    auth: { v: 1, dev: uid, dex: 25, shiny: false, ...o.auth },
+    auth: { v: 1, dex: 25, shiny: false, ...o.auth },
     transports: ['websocket'], reconnection: false, forceNew: true,
-    extraHeaders: o.headers,
+    extraHeaders: { ...(cookie ? { cookie } : {}), ...o.headers },
   });
   open.push(s);
   return s;
@@ -93,23 +103,32 @@ test('una v distinta se rechaza con old-version', async () => {
   assert.equal(err.message, 'old-version');
 });
 
-test('auth.dev vale (provisional, paso 2); sin él o con uno raro: signed-out', async () => {
+test('con la cookie de una sesión entra; sin ella, con otra o con una inventada: signed-out', async () => {
   await connected(client('ok1'));
-  for (const dev of [undefined, '', 'con espacio', 'x'.repeat(33), 42]) {
-    const err = await connected(client('x', { auth: { dev } })).catch(e => e);
-    assert.equal(err.message, 'signed-out');
+  const fake = 'ps_sid=' + 'A'.repeat(43);
+  for (const cookie of [null, fake, 'ps_sid=corta', 'otra=1', cookieFor('ok1') + 'x']) {
+    const err = await connected(client('x', { cookie })).catch(e => e);
+    assert.equal(err.message, 'signed-out', String(cookie));
   }
+  // auth.dev (el del paso 1) ya no vale.
+  const err = await connected(client('x', { cookie: null, auth: { dev: 'ok1' } })).catch(e => e);
+  assert.equal(err.message, 'signed-out');
 });
 
-test('en producción auth.dev no vale', async () => {
-  const prod = start({ NODE_ENV: 'production', CODE_PEPPER: 'prueba' });
-  const port = await prod.listen(0, '127.0.0.1');
-  try {
-    const err = await connected(client('p1', { url: 'http://127.0.0.1:' + port })).catch(e => e);
-    assert.equal(err.message, 'signed-out');
-  } finally {
-    await prod.close();
-  }
+test('el nombre es el de la cuenta, no el que manda el cliente', async () => {
+  const cookie = sessionCookie(srv.store, 'nm1', { name: 'Misty' });
+  const host = await connected(client('nm1', { cookie, auth: { name: 'Otro' } }));
+  const made = await req(host, 'create', { mode: 'server' });
+  assert.equal(made.room.members[0].name, 'Misty');
+});
+
+test('kick: los sockets de una sesión (o de toda la cuenta) se cierran', async () => {
+  const a = await connected(client('kk1'));
+  const gone = new Promise(r => a.once('disconnect', r));
+  srv.relay.kick('kk1', 'otra-sesion');
+  await never(a, 'disconnect', 150);
+  srv.relay.kick('kk1');
+  assert.equal(await gone, 'io server disconnect');
 });
 
 test('un origen que no es SITE_URL no conecta', async () => {

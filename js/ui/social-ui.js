@@ -3,9 +3,9 @@
   const $ = G.UI.$;
   const esc = G.U.esc;
 
-  /** ¿Se puede usar lo online? Si no, explica por qué. */
+  /** ¿Se puede usar lo online? Si no, explica por qué. (Sin Firebase, G.DB.fb, aún no: pasos 4 a 7.) */
   function needOnline() {
-    if (G.DB.online) return true;
+    if (G.DB.online && G.DB.fb) return true;
     G.UI.toast(G.DB.guest ? 'Crea una cuenta para jugar con amigos y salir en el ranking.'
       : 'Esto necesita la versión online del juego (con la nube).', 3200);
     return false;
