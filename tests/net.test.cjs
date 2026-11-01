@@ -6,13 +6,9 @@ const { frame, client } = require('./net-fixtures.cjs');
 const source = file => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
 function codec() { const G = {}; new Function('G', source('js/net/codec.js'))(G); return G.NetCodec; }
 const C = codec();
-// Mensajes por la base de datos: rooms/{sala}/q/{para}/{remitente}_00..99 (database.rules.json).
-// Devuelve la ruta del destinatario, sin el hueco.
-function slotted(p) {
-  const i = p.lastIndexOf('/');
-  assert.match(p.slice(i + 1), /^[A-Za-z0-9]{1,64}_[0-9][0-9]$/);
-  return p.slice(0, i);
-}
+// Lo que va por el canal directo: { k: 'sq', n, d } en JSON o en binario.
+const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
+const unwrap = x => (typeof x === 'string' ? JSON.parse(x) : C.decode(x));
 
 test('host/client frames, events, pauses and Unicode round-trip exactly', () => {
   for (const f of [client(), frame(0, 0), frame(100, 40), frame(600, 400)]) {
@@ -69,9 +65,11 @@ test('bounded deterministic random numeric payloads round-trip', () => {
 });
 
 function network() {
-  const pcs = [], relay = [], G = { NetCodec: codec(), DB: { fb: { uid: 'host', rtdb: {
-    ref: p => ({ on() {}, off() {}, set: s => { relay.push([slotted(p), s]); return Promise.resolve(); } })
-  } } } };
+  const pcs = [], relay = [];
+  const room = { code: [1, 2, 3, 4], state: 'lobby', mode: 'direct', host: 'host', directWaitMs: 6000,
+    members: ['host', 'a', 'b'].map(uid => ({ uid, online: true, path: null, sameNet: false, hideIp: false })) };
+  const G = { NetCodec: codec(), DB: { me: { uid: 'host' } },
+    Relay: { state: 'online', uid: 'host', room, on() {}, off() {}, emit: (...a) => { relay.push(a); return true; } } };
   class PC {
     constructor() { pcs.push(this); }
     createDataChannel() {
@@ -83,47 +81,56 @@ function network() {
   }
   new Function('G', 'RTCPeerConnection', 'setTimeout', 'clearTimeout', source('js/net/net.js'))(G, PC, () => 1, () => {});
   G.Net.open('test', true, 'host'); G.Net.syncMembers(['host', 'a', 'b']);
-  for (const pc of pcs) pc.dc.onopen();
   const cap = dc => dc.onmessage({ data: JSON.stringify({ k: 'net-cap', binary: 1 }) });
-  return { N: G.Net, pcs, relay, cap };
+  const ready = async () => { await settle(); for (const pc of pcs) pc.dc.onopen(); };
+  return { N: G.Net, pcs, relay, cap, ready };
 }
-test('negotiation is per peer; old clients and unknown versions keep JSON', () => {
-  const { N, pcs, cap } = network(), [a, b] = pcs.map(p => p.dc), f = frame();
+test('negotiation is per peer; old clients and unknown versions keep JSON', async () => {
+  const { N, pcs, cap, ready } = network(); await ready();
+  const [a, b] = pcs.map(p => p.dc), f = frame();
   assert.equal(a.binaryType, 'arraybuffer');
   N.send('a', f); assert.equal(typeof a.sent.at(-1), 'string');
   cap(a); b.onmessage({ data: '{"k":"net-cap","binary":99}' });
   N.broadcast(f);
-  assert.ok(a.sent.at(-1) instanceof ArrayBuffer); assert.deepEqual(C.decode(a.sent.at(-1)), f);
-  assert.deepEqual(JSON.parse(b.sent.at(-1)), f);
+  assert.ok(a.sent.at(-1) instanceof ArrayBuffer); assert.deepEqual(unwrap(a.sent.at(-1)), { k: 'sq', n: 2, d: f });
+  assert.deepEqual(JSON.parse(b.sent.at(-1)), { k: 'sq', n: 1, d: f });
   N.send('a', { k: 'start', seed: 12 }); assert.equal(typeof a.sent.at(-1), 'string');
-  N.send('a', { k: 'f' }); assert.equal(typeof a.sent.at(-1), 'string'); // binary would be larger
-  N.send('a', { k: 'f', ev: [undefined] }); assert.deepEqual(C.decode(a.sent.at(-1)), { k: 'f', ev: [null] });
+  N.send('a', { k: 'f' }); assert.deepEqual(unwrap(a.sent.at(-1)).d, { k: 'f' });   // (la que ocupe menos)
+  N.send('a', { k: 'f', ev: [undefined] }); assert.deepEqual(unwrap(a.sent.at(-1)).d, { k: 'f', ev: [null] });
 });
-test('mixed formats arrive unchanged; capabilities and corrupt packets never reach gameplay', () => {
-  const { N, pcs, cap } = network(), dc = pcs[0].dc, got = [];
+test('mixed formats arrive unchanged; capabilities and corrupt packets never reach gameplay', async () => {
+  const { N, pcs, cap, ready } = network(); await ready();
+  const dc = pcs[0].dc, got = [];
   N.on((from, msg) => got.push([from, msg]));
   dc.onmessage({ data: C.encode(frame()) }); assert.equal(got.length, 0);
   cap(dc); assert.equal(got.length, 0);
   dc.onmessage({ data: C.encode(frame()) });
+  dc.onmessage({ data: C.encode({ k: 'sq', n: 1, d: frame(3) }) });
   dc.onmessage({ data: JSON.stringify(client()) });
+  dc.onmessage({ data: JSON.stringify({ k: 'sq', n: 2, d: client() }) });
   dc.onmessage({ data: C.encode({ k: 'start' }) });
+  dc.onmessage({ data: C.encode({ k: 'sq', n: 3, d: { k: 'start' } }) });
   dc.onmessage({ data: new ArrayBuffer(0) });
-  assert.deepEqual(got, [['a', frame()], ['a', client()]]);
-  assert.equal(N.stats.binaryRecv, 1); assert.equal(N.stats.invalidBinary, 3);
+  assert.deepEqual(got, [['a', frame()], ['a', frame(3)], ['a', client()], ['a', client()]]);
+  assert.equal(N.stats.binaryRecv, 2); assert.equal(N.stats.invalidBinary, 4);
 });
-test('byte counters count successful payloads; failed frames never enable database relay', () => {
-  const { N, pcs, cap, relay } = network(), dc = pcs[0].dc, f = frame(); cap(dc);
+test('byte counters count successful payloads; a send that fails on the channel goes through the server', async () => {
+  const { N, pcs, cap, relay, ready } = network(); await ready();
+  const dc = pcs[0].dc, f = frame(); cap(dc);
   N.send('a', f);
-  assert.equal(N.stats.sentBytes, C.encode(f).byteLength);
-  assert.equal(N.stats.jsonBytes, Buffer.byteLength(JSON.stringify(f)));
+  assert.equal(N.stats.sentBytes, C.encode({ k: 'sq', n: 1, d: f }).byteLength);
+  assert.equal(N.stats.jsonBytes, Buffer.byteLength(JSON.stringify({ k: 'sq', n: 1, d: f })));
   assert.equal(N.stats.binarySent, 1);
-  const before = N.stats.sentBytes; dc.fail = true; N.send('a', f);
-  assert.equal(N.stats.sentBytes, before); assert.equal(relay.length, 0);
-  N.send('a', { k: 'start', seed: 1 }); assert.equal(relay.length, 1);
+  const before = N.stats.sentBytes, ms = () => relay.filter(e => e[0] === 'm');
+  assert.equal(ms().length, 0);
+  dc.fail = true; N.send('a', f);
+  assert.equal(N.stats.sentBytes, before);
+  assert.deepEqual(ms().map(e => [e[1], e[2]]), [['a', 2]]);
+  assert.deepEqual(C.decode(ms()[0][3]), f);
 });
-test('reconnect resets capability, so a replaced/old peer never receives binary', () => {
-  const { N, pcs, cap } = network(); cap(pcs[0].dc);
-  N.close(); N.open('next', true, 'host'); N.syncMembers(['host', 'a']);
+test('reconnect resets capability, so a replaced/old peer never receives binary', async () => {
+  const { N, pcs, cap, ready } = network(); await ready(); cap(pcs[0].dc);
+  N.close(); N.open('next', true, 'host'); N.syncMembers(['host', 'a']); await settle();
   const dc = pcs.at(-1).dc; dc.onopen(); N.send('a', frame());
   assert.equal(typeof dc.sent.at(-1), 'string');
 });
@@ -157,120 +164,6 @@ test('real Coop.tick frames pass through the codec without changing gameplay fie
     if (host) { assert.deepEqual(sent[0].e, [[123, 50, -10, 126, 1, 3, 1]]); assert.ok('ho' in sent[0]); }
     else { assert.equal(sent[0].p.length, 17); assert.equal(sent[0].p[15], ''); assert.equal(sent[0].p[16], 1); }   // 16.º: a quién mira estando caído; 17.º: zoom (Luminosfera)
   }
-});
-
-function turnNetwork(respond, { user = { uid: 'host', getIdToken: async () => 'token' }, host = true } = {}) {
-  const pcs = [], calls = [], signals = [], timers = [], G = { NetCodec: codec(), DB: { fb: { uid: host ? 'host' : 'guest', auth: { currentUser: user }, rtdb: {
-    ref: p => ({ on(ev, fn) { this.fn = fn; G.listen = fn; }, off() {}, set: s => { signals.push([slotted(p), JSON.parse(s)]); return Promise.resolve(); } })
-  } } } };
-  class PC {
-    constructor(cfg) { this.cfg = cfg; pcs.push(this); }
-    createDataChannel() { return this.dc = { readyState: 'connecting', send() {}, close() {} }; }
-    createOffer() { return Promise.resolve({ type: 'offer' }); }
-    createAnswer() { return Promise.resolve({ type: 'answer' }); }
-    setLocalDescription(d) { this.localDescription = { toJSON: () => d }; return Promise.resolve(); }
-    setRemoteDescription(d) { this.remoteDescription = d; return Promise.resolve(); }
-    addIceCandidate(c) { (this.added = this.added || []).push(c); return Promise.resolve(); }
-    fail() { this.connectionState = 'failed'; this.onconnectionstatechange(); }
-    close() {}
-  }
-  const setTimeout = (fn, ms) => { timers.push(ms); if (ms === 0) Promise.resolve().then(fn); return timers.length; };
-  const fetch = async (url, opt) => { calls.push([url, opt]); return respond(); };
-  new Function('G', 'RTCPeerConnection', 'setTimeout', 'clearTimeout', 'fetch', source('js/net/net.js'))(G, PC, setTimeout, () => {}, fetch);
-  const offer = (t) => G.listen({ val: () => JSON.stringify({ f: 'host', sig: t ? { sdp: { type: 'offer' }, t: 1 } : { sdp: { type: 'offer' } } }), ref: { remove: () => Promise.resolve() } });
-  const deliver = sig => G.listen({ val: () => JSON.stringify({ f: 'host', sig }), ref: { remove: () => Promise.resolve() } });
-  return { N: G.Net, pcs, calls, signals, timers, offer, deliver };
-}
-const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
-const turnReply = (body, status = 200) => ({ ok: status === 200, status, json: async () => body });
-const goodTurn = () => turnReply({ expiresAt: Date.now() / 1000 + 7200, iceServers: [
-  { urls: ['turn:turn.pokesurvivor.com:3478?transport=udp', 'turn:evil.example:3478', 'stun:x'], username: 'u', credential: 'c' },
-  { urls: ['turn:turn.pokesurvivor.com:3478?transport=tcp'], username: '', credential: 'c' }] });
-
-test('own TURN: first try is direct only; a failed pair retries at once with clean TURN servers', async () => {
-  const { N, pcs, calls, signals } = turnNetwork(goodTurn);
-  N.open('room', true, 'host'); N.syncMembers(['host', 'a', 'b']); await settle();
-  assert.equal(calls.length, 1, 'credentials are fetched on entering, so a retry never waits for them');
-  assert.equal(pcs.length, 2);
-  for (const pc of pcs) assert.equal(pc.cfg.iceServers.length, 1);
-  assert.ok(signals.every(([, m]) => !m.sig.sdp || !m.sig.t));
-  pcs[0].fail(); await settle();
-  assert.equal(calls.length, 1, 'the retry reuses the ones just fetched');
-  assert.equal(calls[0][0], 'https://ice.pokesurvivor.com/v1/ice');
-  assert.equal(calls[0][1].method, 'POST'); assert.equal(calls[0][1].headers.Authorization, 'Bearer token');
-  const retry = pcs[2];
-  assert.equal(retry.cfg.iceServers[0].urls[0], 'stun:stun.l.google.com:19302');
-  assert.deepEqual(retry.cfg.iceServers.slice(1), [{ urls: ['turn:turn.pokesurvivor.com:3478?transport=udp'], username: 'u', credential: 'c' }]);
-  const offers = signals.filter(([p, m]) => p.endsWith('/a') && m.sig.sdp);
-  assert.equal(offers.at(-1)[1].sig.t, 1);
-  assert.equal(pcs.length, 3, 'only the failed pair reserves TURN');
-});
-test('own TURN: refused or broken answers still ask the guest for theirs, then wait as before', async () => {
-  for (const respond of [() => turnReply({ error: 'user_denied' }, 403), () => { throw Error('offline'); },
-    () => turnReply({ expiresAt: 1, iceServers: [] })]) {
-    const { N, pcs, calls, timers, signals } = turnNetwork(respond);
-    N.open('room', true, 'host'); N.syncMembers(['host', 'a']); await settle();
-    pcs[0].fail(); await settle();
-    assert.equal(calls.length, 1); assert.equal(pcs.length, 2); assert.equal(pcs[1].cfg.iceServers.length, 1);
-    assert.equal(signals.filter(([, m]) => m.sig.sdp).at(-1)[1].sig.t, 1, 'the guest may have TURN');
-    assert.equal(timers.at(-1), 15000, 'and waits the TURN time for it');
-    pcs[1].fail(); await settle();
-    assert.equal(timers.at(-1), 15000); assert.equal(pcs.length, 2); assert.equal(calls.length, 1);
-  }
-});
-test('own TURN: a server that failed is asked again soon (not after a minute); a refused account, in half an hour', async () => {
-  const realNow = Date.now;
-  try {
-    for (const [respond, wait] of [[() => { throw Error('timeout'); }, 10000], [() => turnReply({}, 502), 10000],
-      [() => turnReply({ error: 'user_denied' }, 403), 1800000]]) {
-      let now = 1e12; Date.now = () => now;
-      const { N, calls } = turnNetwork(respond);
-      N.open('room', true, 'host'); await settle();
-      assert.equal(calls.length, 1);
-      now += wait - 1; N.close(); N.open('room2', true, 'host'); await settle();
-      assert.equal(calls.length, 1);
-      now += 2; N.close(); N.open('room3', true, 'host'); await settle();
-      assert.equal(calls.length, 2);
-    }
-  } finally { Date.now = realNow; }
-});
-test('own TURN: guests have theirs ready on entering and use it only when the host asks for it', async () => {
-  const { N, pcs, calls, offer, timers } = turnNetwork(goodTurn, { user: { uid: 'guest', getIdToken: async () => 'token' }, host: false });
-  N.open('room', false, 'host'); await settle();
-  assert.equal(calls.length, 1);
-  offer(false); await settle();
-  assert.equal(pcs[0].cfg.iceServers.length, 1); assert.equal(timers.at(-1), 9000);
-  offer(true); await settle();
-  assert.equal(calls.length, 1); assert.equal(pcs[1].cfg.iceServers.length, 2); assert.equal(timers.at(-1), 15000);
-});
-test('own TURN: a guest without it still waits the TURN time when the host brings one', async () => {
-  const { N, pcs, offer, timers } = turnNetwork(() => turnReply({ error: 'user_denied' }, 403), { user: { uid: 'guest', getIdToken: async () => 'token' }, host: false });
-  N.open('room', false, 'host'); await settle();
-  offer(true); await settle();
-  assert.equal(pcs[0].cfg.iceServers.length, 1); assert.equal(timers.at(-1), 15000);
-});
-test('own TURN: players without an account never ask, but the guest is still asked for theirs', async () => {
-  for (const user of [null, { uid: 'anon', isAnonymous: true }]) {
-    const { N, pcs, calls, timers, signals } = turnNetwork(() => assert.fail('no request'), { user });
-    N.open('room', true, 'host'); N.syncMembers(['host', 'a']); await settle();
-    pcs[0].fail(); await settle();
-    assert.equal(calls.length, 0); assert.equal(pcs.length, 2); assert.equal(pcs[1].cfg.iceServers.length, 1);
-    assert.equal(signals.filter(([, m]) => m.sig.sdp).at(-1)[1].sig.t, 1);
-    pcs[1].fail(); await settle();
-    assert.equal(timers.at(-1), 15000); assert.equal(pcs.length, 2);
-  }
-});
-test('own TURN: a pair that needed it starts with it next time, and after 2 such guests everyone does', async () => {
-  const { N, pcs } = turnNetwork(goodTurn);
-  N.open('room', true, 'host'); N.syncMembers(['host', 'a']); await settle();
-  pcs[0].fail(); await settle();
-  N.close(); N.open('room2', true, 'host'); N.syncMembers(['host', 'a', 'b']); await settle();
-  const [a2, b1] = pcs.slice(-2);
-  assert.equal(a2.cfg.iceServers.length, 2, 'a remembered for the whole session');
-  assert.equal(b1.cfg.iceServers.length, 1, 'b still tries direct first');
-  b1.fail(); await settle();
-  N.syncMembers(['host', 'a', 'b', 'c']); await settle();
-  assert.equal(pcs.at(-1).cfg.iceServers.length, 2, 'two failures: own network needs TURN');
 });
 
 function coopWithCuts(host) {
@@ -376,22 +269,6 @@ test('co-op orbs: the host applies a guest orb only if the guest really has it, 
   assert.ok(G.Orbs.canTake(guest, 'blowback'));      // (las dos Rapidosferas ya se gastaron: queda 1 hueco)
   G.Orbs.add(guest, 'quick');
   assert.ok(!G.Orbs.canTake(guest, 'blowback'));     // y 4 huecos
-});
-
-test('connection candidates travel together in one database message, and both formats are understood', async () => {
-  const { N, pcs, signals, offer, deliver } = turnNetwork(goodTurn, { user: { uid: 'guest', getIdToken: async () => 'token' }, host: false });
-  N.open('room', false, 'host');
-  offer(false); await settle();
-  const pc = pcs[0], before = signals.length;
-  for (const n of [1, 2, 3]) pc.onicecandidate({ candidate: { toJSON: () => ({ candidate: 'c' + n }) } });
-  assert.equal(signals.length, before, 'they wait to go together');
-  pc.onicecandidate({ candidate: null });
-  assert.equal(signals.length, before + 1, 'one message');
-  assert.deepEqual(signals.at(-1)[1].sig.cs.map(c => c.candidate), ['c1', 'c2', 'c3']);
-  deliver({ cs: [{ candidate: 'h1' }, { candidate: 'h2' }] });   // de esta versión
-  deliver({ c: { candidate: 'h3' } });                          // de las de antes
-  await settle();
-  assert.deepEqual(pc.added.map(c => c.candidate).sort(), ['h1', 'h2', 'h3']);   // (el orden da igual)
 });
 
 function coopSums(host, mySum) {
@@ -502,31 +379,29 @@ test('co-op jammed connection: nothing piles up behind (the 4-minute delay); eve
   assert.deepEqual(g.sent.at(-1).ev.at(-1), ['bye'], 'leaving is always said');
 });
 
-test('net busy: only an open channel with a big backlog counts as busy', async () => {
-  const { N, pcs } = turnNetwork(goodTurn);
-  N.open('room', true, 'host'); N.syncMembers(['host', 'a']); await settle();
+test('net busy: an open channel counts its backlog past 64 KB', async () => {
+  const { N, pcs, ready } = network(); await ready();
   const dc = pcs[0].dc;
-  assert.equal(N.busy('a'), false);
-  dc.readyState = 'open'; dc.bufferedAmount = 64 * 1024;
+  dc.bufferedAmount = 64 * 1024;
   assert.equal(N.busy('a'), false);
   dc.bufferedAmount = 64 * 1024 + 1;
   assert.equal(N.busy('a'), true);
   assert.equal(N.busy('nadie'), false);
 });
 
-// ---------------- misma wifi (net.js lanCandidate, social.js lanKey) ----------------
+// ---------------- misma wifi (net.js lanCandidate, «Conectar en local») ----------------
 const HIDDEN = 'candidate:842163049 1 udp 2122260223 3a1b2c3d-1111-2222-3333-444455556666.local 54321 typ host generation 0 ufrag abcd network-cost 999';
 const srflx = ip => ({ candidate: 'candidate:1 1 udp 1686052607 ' + ip + ' 61022 typ srflx raddr 0.0.0.0 rport 0 generation 0', sdpMid: '0', sdpMLineIndex: 0 });
 
 test('same Wi-Fi: only private IPv4 counts as a local IP', () => {
-  const { N } = turnNetwork(goodTurn);
+  const { N } = network();
   for (const ip of ['192.168.1.20', '10.0.0.15', '172.16.0.1', '172.31.255.254', ' 192.168.0.7 ']) assert.ok(N.isLocalIp(ip), ip);
   for (const ip of ['8.8.8.8', '203.0.113.7', '172.15.0.1', '172.32.0.1', '192.169.1.1', '192.168.1', '192.168.1.256',
     '192.168.01.20', 'a.b.c.d', '', null, 'fe80::1']) assert.ok(!N.isLocalIp(ip), String(ip));
 });
 
 test('same Wi-Fi: a hidden .local UDP host candidate gets a copy with the typed IP; nothing else changes', () => {
-  const { N } = turnNetwork(goodTurn);
+  const { N } = network();
   const c = { candidate: HIDDEN, sdpMid: '0', sdpMLineIndex: 0, usernameFragment: 'abcd' };
   const lan = N.lanCandidate(c, '192.168.1.20');
   assert.equal(lan.candidate, HIDDEN.replace(/\S+\.local/, '192.168.1.20'));
@@ -539,24 +414,10 @@ test('same Wi-Fi: a hidden .local UDP host candidate gets a copy with the typed 
   assert.equal(N.lanCandidate({ candidate: 'c1' }, '192.168.1.20'), null);
 });
 
-test('same Wi-Fi: the host sends both candidates once it has a local IP; guests never rewrite', async () => {
-  const host = turnNetwork(goodTurn);
-  host.N.open('room', true, 'host'); host.N.setLanIp('192.168.1.20'); host.N.syncMembers(['host', 'a']); await settle();
-  assert.equal(host.N.lanIp, '192.168.1.20');
-  host.pcs[0].onicecandidate({ candidate: { toJSON: () => ({ candidate: HIDDEN }) } });
-  host.pcs[0].onicecandidate({ candidate: null });
-  assert.deepEqual(host.signals.at(-1)[1].sig.cs.map(c => c.candidate), [HIDDEN, HIDDEN.replace(/\S+\.local/, '192.168.1.20')]);
-
-  const guest = turnNetwork(goodTurn, { user: { uid: 'guest', getIdToken: async () => 'token' }, host: false });
-  guest.N.open('room', false, 'host'); guest.N.setLanIp('192.168.1.34');
-  guest.offer(false); await settle();
-  guest.pcs[0].onicecandidate({ candidate: { toJSON: () => ({ candidate: HIDDEN }) } });
-  guest.pcs[0].onicecandidate({ candidate: null });
-  assert.deepEqual(guest.signals.at(-1)[1].sig.cs.map(c => c.candidate), [HIDDEN]);
-});
-
 test('same Wi-Fi: turning local mode on redoes the pairs that have not connected, and leaving the room turns it off', async () => {
-  const { N, pcs } = turnNetwork(goodTurn);
+  const w = relayWorld({ direct: false });
+  const { N } = w.add('host'); w.add('a'); w.add('b');
+  const pcs = { get length() { return w.pcs.filter(pc => pc.owner === 'host').length; } };
   N.open('room', true, 'host'); N.syncMembers(['host', 'a', 'b']); await settle();
   assert.equal(pcs.length, 2);
   N.setLanIp('10.0.0.15'); await settle();
@@ -569,30 +430,7 @@ test('same Wi-Fi: turning local mode on redoes the pairs that have not connected
   assert.equal(N.lanIp, null);
 });
 
-test('same Wi-Fi: two players behind the same router are spotted from their STUN candidates', async () => {
-  const { N, pcs, offer, deliver } = turnNetwork(goodTurn, { user: { uid: 'guest', getIdToken: async () => 'token' }, host: false });
-  N.open('room', false, 'host');
-  offer(false); await settle();
-  pcs[0].onicecandidate({ candidate: { toJSON: () => srflx('203.0.113.7') } });
-  deliver({ cs: [{ candidate: HIDDEN }, srflx('198.51.100.4')] }); await settle();
-  assert.equal(N.sameNetwork('host'), false, 'different public IP: different networks');
-  deliver({ cs: [srflx('203.0.113.7')] }); await settle();
-  assert.equal(N.sameNetwork('host'), true);
-  assert.equal(N.sameNetwork('nobody'), false);
-});
-
-test('same Wi-Fi: the room key is 24 characters of SHA-256, and another network gives another key', async () => {
-  const G = { DB: { onLeave() {} } };
-  new Function('G', source('js/net/social.js'))(G);
-  const k = await G.Social.lanKey('203.0.113.7', '192.168.1.20');
-  const want = require('node:crypto').createHash('sha256').update('203.0.113.7|192.168.1.20').digest('base64url').slice(0, 24);
-  assert.equal(k, want);
-  assert.match(k, /^[A-Za-z0-9_-]{24}$/);
-  assert.notEqual(await G.Social.lanKey('198.51.100.4', '192.168.1.20'), k, 'same local IP, other router: not found');
-  assert.notEqual(await G.Social.lanKey('203.0.113.7', '192.168.1.21'), k);
-});
-
-// ---------------- servidor del cooperativo (?relay): G.Relay falso en memoria ----------------
+// ---------------- el servidor del juego: G.Relay falso en memoria ----------------
 // Reloj falso compartido: advance(ms) ejecuta en orden los temporizadores que vencen.
 function fakeClock() {
   let now = 0, id = 0; const ts = new Map();
@@ -634,8 +472,8 @@ function dcPair() {
  * no abre nunca. holdAcks: los ack se quedan en el servidor (releaseAcks los suelta).
  */
 function relayWorld({ mode = 'direct', directWaitMs = 6000, direct = true, members = {} } = {}) {
-  const clk = fakeClock(), pcs = [], nodes = new Map(), log = [], rtdbRefs = [];
-  const w = { clk, pcs, log, rtdbRefs, direct, holdAcks: false, heldAcks: [], dropAcks: false, holdM: false, heldM: [],
+  const clk = fakeClock(), pcs = [], nodes = new Map(), log = [];
+  const w = { clk, pcs, log, direct, stun: ['stun:stun.example:3478'], configAsks: 0, holdAcks: false, heldAcks: [], dropAcks: false, holdM: false, heldM: [],
     room: { code: [1, 2, 3, 4], state: 'lobby', mode, host: 'host', directWaitMs, members: [] } };
   const deliver = (to, ev, ...args) => Promise.resolve().then(() => { const n = nodes.get(to); if (n) n.fire(ev, ...args); });
   w.releaseAcks = () => { for (const [from, seq] of w.heldAcks.splice(0)) nodes.get('host').fire('ack', from, seq); };
@@ -648,6 +486,7 @@ function relayWorld({ mode = 'direct', directWaitMs = 6000, direct = true, membe
       fire(ev, ...args) { for (const fn of [...(fns.get(ev) || [])]) fn(...args); },
       listeners: ev => (fns.get(ev) || new Set()).size,
       emit(ev, ...args) {
+        if (this.dead) return;                   // (una página que ya se recargó)
         log.push([uid, ev, ...args]);
         if (ev === 'sig') deliver(args[0], 'sig', uid, JSON.parse(JSON.stringify(args[1])));
         else if (ev === 'm') { if (w.holdM) w.heldM.push([args[0], 'm', uid, args[1], args[2]]); else deliver(args[0], 'm', uid, args[1], args[2]); }
@@ -679,18 +518,33 @@ function relayWorld({ mode = 'direct', directWaitMs = 6000, direct = true, membe
       close() { this.closed = true; }
     };
   }
-  w.add = uid => {
-    w.room.members.push({ uid, name: uid, dex: 25, shiny: false, online: true, path: null, sameNet: false, hideIp: false, ...members[uid] });
+  // ep: la carga de la página de cada uno (relay.js), en la foto de la sala.
+  const node = uid => {
     const relay = fakeRelay(uid);
-    const G = { NetCodec: codec(), Relay: relay, DB: { fb: { uid, rtdb: { ref: p => {
-      rtdbRefs.push(p); return { on() {}, off() {}, set: () => { rtdbRefs.push('set ' + p); return Promise.resolve(); } };
-    } } } } };
+    const Api = { get: async url => { assert.equal(url, '/api/config'); w.configAsks++; if (!w.stun) throw Error('offline'); return { stunUrls: w.stun }; } };
+    const G = { NetCodec: codec(), Relay: relay, Api, DB: { me: { uid } } };
     new Function('G', 'RTCPeerConnection', 'setTimeout', 'clearTimeout', source('js/net/net.js'))(G, PCFor(uid), clk.setTimeout, clk.clearTimeout);
     nodes.set(uid, relay);
-    const got = [], states = [];
-    G.Net.on((from, msg) => got.push([from, msg]));
+    const got = [], olds = [], states = [];
+    G.Net.on((from, msg, old) => { got.push([from, msg]); if (old) olds.push(msg); });
     G.Net.onPeer((u, s) => states.push([u, s]));
-    return { N: G.Net, relay, got, states };
+    return { N: G.Net, relay, got, olds, states };
+  };
+  w.add = uid => {
+    w.room.members.push({ uid, name: uid, dex: 25, shiny: false, online: true, path: null, sameNet: false, hideIp: false, ep: uid + '-1', ...members[uid] });
+    return node(uid);
+  };
+  // Recarga la página de uid: un net.js nuevo, otro ep en la foto (que llega a todos antes que nada suyo).
+  w.reload = uid => {
+    // La página de antes muere: su socket ya no manda nada y sus canales directos se cierran.
+    nodes.get(uid).dead = true;
+    // (Las pruebas de recarga son de dos: todos los canales son con esa página.)
+    for (const pc of pcs) if (pc.dc) pc.dc.close();
+    const m = w.room.members.find(x => x.uid === uid);
+    m.ep = uid + '-' + (+m.ep.split('-').pop() + 1);
+    const n = node(uid);
+    for (const u of nodes.keys()) deliver(u, 'room', w.room);
+    return n;
   };
   return w;
 }
@@ -712,10 +566,9 @@ test('relay: host and guest reach direct over socket signaling, with no Realtime
   assert.equal(host.N.mode('g'), 'direct');
   assert.equal(guest.N.mode('host'), 'direct');
   assert.deepEqual(paths(w), [['g', 'direct']], 'the host reports the path');
-  assert.deepEqual(w.rtdbRefs, [], 'no rooms/<id>/q reads or writes');
   assert.ok(w.log.some(([u, ev, to, sig]) => u === 'host' && ev === 'sig' && to === 'g' && sig.sdp.type === 'offer'));
   assert.ok(w.log.some(([u, ev, to, sig]) => u === 'g' && ev === 'sig' && to === 'host' && sig.sdp.type === 'answer'));
-  assert.ok(w.pcs.every(pc => pc.cfg.iceServers.length === 1), 'no TURN with the relay');
+  assert.ok(w.pcs.every(pc => JSON.stringify(pc.cfg.iceServers) === '[{"urls":["stun:stun.example:3478"]}]'), 'STUN from /api/config, no TURN');
   host.N.send('g', numbered(1)); guest.N.toHost(client());
   assert.deepEqual(guest.got.map(([f, m]) => [f, tOf(m)]), [['host', 1]]);
   assert.deepEqual(host.got, [['g', client()]]);
@@ -741,7 +594,6 @@ test('relay: connection candidates still go together, one { cs } per 250 ms, and
   assert.deepEqual(cs('g')[0].map(c => c.candidate), [HIDDEN, srflx('203.0.113.7').candidate]);
   await settle();
   assert.equal(gpc.added.length, 3, 'the guest adds what the host sent');
-  assert.deepEqual(w.rtdbRefs, []);
 });
 
 test('relay: direct never opens, so after directWaitMs the pair plays through the server', async () => {
@@ -763,7 +615,6 @@ test('relay: direct never opens, so after directWaitMs the pair plays through th
   assert.deepEqual(ms.map(e => [e[0], e[2], e[3]]), [['host', 'g', 1], ['host', 'g', 2], ['g', 'host', 1]]);
   assert.ok(ms[0][4] instanceof ArrayBuffer, 'frames go as binary'); assert.equal(typeof ms[1][4], 'string');
   assert.ok(w.pcs.every(pc => pc.closed), 'no WebRTC left open');
-  assert.deepEqual(w.rtdbRefs, []);
   assert.ok(!host.states.some(([, s]) => s === 'failed'));
 });
 
@@ -956,24 +807,7 @@ test('relay: a player dropping for a moment is away (slow), comes back, and gone
   assert.deepEqual(host.states.map(([, s]) => s).slice(-3), ['away', 'connecting', 'closed']);
 });
 
-test('relay: with G.Relay present but not enabled, signaling still goes through the database as today', async () => {
-  const writes = [], G = { NetCodec: codec(), Relay: { enabled: false, on: () => assert.fail('on'), emit: () => assert.fail('emit') },
-    DB: { fb: { uid: 'host', rtdb: { ref: p => ({ on() {}, off() {}, set: s => { writes.push([slotted(p), JSON.parse(s)]); return Promise.resolve(); } }) } } } };
-  class PC {
-    constructor(cfg) { this.cfg = cfg; }
-    createDataChannel() { return { readyState: 'connecting', send() {}, close() {} }; }
-    createOffer() { return Promise.resolve({ type: 'offer' }); }
-    setLocalDescription(d) { this.localDescription = { toJSON: () => d }; return Promise.resolve(); }
-    close() {}
-  }
-  const timers = [];
-  new Function('G', 'RTCPeerConnection', 'setTimeout', 'clearTimeout', source('js/net/net.js'))(G, PC, (fn, ms) => timers.push(ms), () => {});
-  G.Net.open('room', true, 'host'); G.Net.syncMembers(['host', 'a']); await settle();
-  assert.deepEqual(writes.map(([p, m]) => [p, m.sig.sdp.type]), [['rooms/room/q/a', 'offer']]);
-  assert.equal(timers.at(-1), 9000);
-});
-
-// ---------------- coop.js sobre el camino del servidor (?relay) ----------------
+// ---------------- coop.js sobre el camino del servidor ----------------
 // El coop.js de verdad encima del net.js de verdad de cada uno, con el G.Relay falso.
 // ready, busy y load de net.js tienen que contar el camino por el servidor: si no,
 // coop.js no manda nada a una pareja que va por él y los eventos se amontonan.
@@ -1102,4 +936,146 @@ test('co-op: leaving with a big backlog still tells the host ("bye" is never cut
   assert.equal(g.sent.length, 1);
   assert.ok(g.sent[0].ev.length <= 500);
   assert.deepEqual(g.sent[0].ev.at(-1), ['bye']);
+});
+
+// ---------------- STUN, recargas, confirmaciones y envíos que llegan tarde ----------------
+
+test('STUN comes from /api/config once per page; an empty list means none; no answer, none this time and it asks again', async () => {
+  const { w, host } = await relayPair({ direct: false });
+  assert.equal(w.configAsks, 2, 'one per page (host and guest)');
+  host.N.setLanIp('192.168.1.20'); await settle();       // rehace la pareja: ya la tiene
+  assert.equal(w.configAsks, 2);
+  const none = relayWorld({ direct: false });
+  none.stun = [];
+  const h = none.add('host'); none.add('g');
+  h.N.open('room', true, 'host'); h.N.syncMembers(['host', 'g']); await settle();
+  assert.deepEqual(none.pcs[0].cfg.iceServers, [], 'STUN_URLS empty: no STUN at all');
+  const down = relayWorld({ direct: false });
+  down.stun = null;
+  const d = down.add('host'); down.add('g');
+  d.N.open('room', true, 'host'); d.N.syncMembers(['host', 'g']); await settle();
+  assert.deepEqual(down.pcs[0].cfg.iceServers, []);
+  down.stun = ['stun:later.example:3478'];
+  d.N.setLanIp('10.0.0.15'); await settle();
+  assert.deepEqual(down.pcs.at(-1).cfg.iceServers, [{ urls: ['stun:later.example:3478'] }]);
+  assert.equal(down.configAsks, 2);
+});
+
+test('reload: a guest that reloads within the away window starts a fresh numbering on both sides, and gets frames again', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  for (let i = 1; i <= 300; i++) { host.N.send('g', numbered(i)); guest.N.toHost(client()); }
+  await settle();
+  assert.equal(guest.got.length, 300); assert.equal(host.got.length, 300);
+  // Recarga: lo que el anfitrión manda justo entonces (aún con los números de antes) va de camino.
+  w.holdM = true;
+  for (let i = 301; i <= 305; i++) host.N.send('g', numbered(i));
+  host.relay.fire('peer', 'g', 'away');
+  const g2 = w.reload('g');
+  g2.N.open('room', false, 'host');
+  await settle();
+  w.holdM = false; w.releaseM(); await settle();
+  assert.deepEqual(g2.got, [], 'what was numbered for the old page is dropped');
+  host.relay.fire('peer', 'g', 'online'); await settle();
+  // Lo de la página nueva llega al anfitrión (antes lo tiraba por repetido: 1..300 ya vistos).
+  g2.N.toHost(client()); g2.N.toHost(client()); await settle();
+  assert.equal(host.got.length, 302);
+  // Y lo del anfitrión a la página nueva va desde el 1.
+  const from = w.log.length;
+  host.N.send('g', numbered(400)); await settle();
+  assert.deepEqual(w.log.slice(from).filter(e => e[0] === 'host' && e[1] === 'm').map(e => e[3]), [1]);
+  assert.deepEqual(g2.got.map(([, m]) => tOf(m)), [400]);
+  // Una foto nueva sin recarga (mismo ep) no reinicia nada.
+  host.relay.fire('room', w.room); await settle();
+  host.N.send('g', numbered(401)); await settle();
+  assert.deepEqual(g2.got.map(([, m]) => tOf(m)), [400, 401]);
+});
+
+test('reload: the host reloading makes the guest start over with it too, and redo the connection', async () => {
+  const { w, host, guest } = await relayPair();
+  assert.equal(guest.N.mode('host'), 'direct');
+  for (let i = 1; i <= 20; i++) { host.N.send('g', numbered(i)); guest.N.toHost(client()); }
+  await settle();
+  const h2 = w.reload('host'); await settle();
+  assert.equal(guest.N.mode('host'), 'connecting', 'waiting for the new page to offer again');
+  h2.N.open('room', true, 'host'); h2.N.syncMembers(['host', 'g']); await settle();
+  assert.equal(guest.N.mode('host'), 'direct');
+  h2.N.send('g', numbered(1)); guest.N.toHost(client()); await settle();
+  assert.deepEqual(guest.got.slice(20).map(([, m]) => tOf(m)), [1], 'the new host page is heard from its first message');
+  assert.equal(h2.got.length, 1);
+});
+
+test('acks: the guest acks the last seq with no gap; the host repeats the gap and is not left stuck busy', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  const acks = () => w.log.filter(e => e[0] === 'g' && e[1] === 'ack').map(e => e[2]);
+  for (let i = 1; i <= 5; i++) host.N.send('g', numbered(i));
+  await settle();
+  assert.deepEqual(acks(), [5]);
+  w.holdM = true; host.N.send('g', frame(600, 400, 6)); w.heldM.length = 0; w.holdM = false;   // se pierde
+  for (let i = 7; i <= 16; i++) host.N.send('g', frame(600, 400, i));
+  await settle();
+  assert.equal(guest.got.length, 15, 'what came after the gap is delivered');
+  assert.deepEqual(acks(), [5, 5, 5], 'never past the gap (before: 11 and 16)');
+  assert.equal(host.N.busy('g'), true, 'the host waits');
+  await w.clk.advance(1500);                             // sin avanzar: repite lo primero que falta
+  assert.equal(acks().at(-1), 16, 'the gap fills and the guest says so at once');
+  assert.equal(guest.got.filter(([, m]) => tOf(m) === 6).length, 1, 'once');
+  assert.equal(host.N.busy('g'), false);
+  assert.equal(host.N.load('g'), 0);
+});
+
+test('acks: a gap that never fills is skipped after 3 s, so the acks move on', async () => {
+  const { w, guest } = await relayPair({ direct: false });
+  await w.clk.advance(6000);
+  const acks = () => w.log.filter(e => e[0] === 'g' && e[1] === 'ack').map(e => e[2]);
+  for (const n of [1, 2, 4, 5, 6]) guest.relay.fire('m', 'host', n, JSON.stringify(numbered(n)));
+  await w.clk.advance(1000);
+  assert.deepEqual(acks(), [2]);
+  await w.clk.advance(2000);
+  assert.deepEqual(acks(), [2, 6]);
+  guest.relay.fire('m', 'host', 3, JSON.stringify(numbered(3)));
+  assert.equal(guest.got.length, 5, 'a late 3 after the skip is not delivered');
+});
+
+test('late frames: an older frame is delivered marked old (events only), other messages as usual, each once', async () => {
+  const { w, host, guest } = await relayPair({ direct: false });
+  w.holdM = true;
+  host.N.send('g', numbered(1));                         // seq 1, por el servidor (aún conectando)
+  host.N.send('g', { k: 'start', seed: 1 });             // seq 2
+  await settle();
+  const hpc = w.pcs.find(pc => pc.owner === 'host'), gpc = w.pcs.find(pc => pc.owner === 'g');
+  gpc.ondatachannel({ channel: hpc.far }); hpc.dc.open();
+  host.N.send('g', numbered(3));                         // seq 3, por el canal: llega antes
+  w.releaseM(); await settle();
+  assert.deepEqual(guest.got.map(([, m]) => (m.k === 'f' ? tOf(m) : m.k)), [3, 1, 'start']);
+  assert.deepEqual(guest.olds.map(tOf), [1], 'frame 1 came after frame 3');
+  host.N.send('g', numbered(4)); await settle();
+  assert.deepEqual(guest.olds.map(tOf), [1]);
+});
+
+test('co-op: a late frame applies its events once, never its state (positions and HP do not jump back)', () => {
+  for (const host of [false, true]) {
+    let msgFn = null; const said = [], broke = [], synced = [];
+    const G = {};
+    G.Net = { uid: host ? 'host' : 'guest', on(fn) { msgFn = fn; }, onPeer() {}, slow: () => false, busy: () => false, ready: () => true, load: () => 0, send() {}, toHost() {}, mode: () => 'direct' };
+    G.Player = class { constructor() { this.maxHp = 300; } };
+    G.DEX_BY = { 25: { dex: 25 } }; G.baseStartOf = () => 'thundershock';
+    G.Sprites = { preload() {} }; G.U = { dist2: () => 0, clamp: (v, a, b) => Math.min(b, Math.max(a, v)) };
+    G.EnemyMgr = { all: () => [], get: () => null }; G.Judgment = { netState: () => null, netApply() {} };
+    G.Rift = { netState: () => [0, 0], netApply() {} }; G.World = { breakAt: (x, y) => broke.push([x, y]) };
+    G.Spawner = { say: t => said.push(t) }; G.Social = { me: { name: 'yo' } };
+    new Function('G', 'document', 'setTimeout', 'clearTimeout', source('js/net/coop.js'))(G, { addEventListener() {} }, () => 0, () => {});
+    G.Coop.begin({ host: 'host', members: [{ uid: 'host', name: 'Ana', dex: 25 }, { uid: 'guest', name: 'Bea', dex: 25 }] }, { x: 0, y: 0 },
+      { syncTeam: t => synced.push(t.time), hold() {}, away() {}, lost() {}, mateLeft() {}, waiting() {}, levelStart() {}, resume() {} });
+    const other = host ? 'guest' : 'host';
+    const st = x => [x, 0, 1.57, 1, 243, 300, 0, 'ember', 4, 108, -0.85, 1.25, 0, 0, 7];
+    const f = (t, x, ev) => (host ? { k: 'f', p: st(x), ev } : { k: 'f', t, p: { [other]: st(x) }, ev });
+    msgFn(other, f(20, 500, [host ? ['pb', 1, 1] : ['say', 'nuevo', 1]]), false);
+    msgFn(other, f(10, 100, [host ? ['pb', 2, 2] : ['say', 'viejo', 1]]), true);
+    const mate = G.Coop.puppets()[0];
+    assert.equal(mate.net.x, 500, (host ? 'host' : 'guest') + ': the newer position stays');
+    if (host) assert.deepEqual(broke, [[1, 1], [2, 2]]);
+    else { assert.deepEqual(said, ['nuevo', 'viejo']); assert.deepEqual(synced, [20], 'the team state of the late frame is not applied'); }
+  }
 });

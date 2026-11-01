@@ -9,20 +9,21 @@ const tick = () => new Promise(r => setImmediate(r));
 // Socket falso: guarda los manejadores; el "servidor" acepta o rechaza a mano.
 function fakeIo() {
   const sockets = [];
-  function io(url, opts) {
+  function io(a, b) {
+    const opts = b || a, url = b ? a : undefined;
     const h = new Map();
     const s = {
-      url, opts, connected: false, active: false, emitted: [], auths: [], connects: 0, closed: false,
+      url, opts, args: b ? 2 : 1, connected: false, active: false, emitted: [], auths: [], connects: 0, closed: false,
       on(ev, fn) { if (!h.has(ev)) h.set(ev, []); h.get(ev).push(fn); return s; },
       off() { h.clear(); return s; },
-      fire(ev, ...a) { for (const fn of [...(h.get(ev) || [])]) fn(...a); },
+      fire(ev, ...x) { for (const fn of [...(h.get(ev) || [])]) fn(...x); },
       connect() {
         s.connects++; s.active = true;
         opts.auth(data => s.auths.push(data));
         return s;
       },
       disconnect() { s.closed = true; s.connected = false; s.active = false; return s; },
-      emit(...a) { s.emitted.push(a); return s; },
+      emit(...x) { s.emitted.push(x); return s; },
       // lado del servidor
       accept() { s.connected = true; s.fire('connect'); },
       reject(msg) { s.active = false; s.fire('connect_error', new Error(msg)); },
@@ -35,25 +36,15 @@ function fakeIo() {
   return { io, sockets };
 }
 
-function setup({ url = 'http://relay.test', search = '?relay', user = true, ioFn, timers } = {}) {
+function setup({ protocol = 'https:', online = true, me = { uid: 'u1', name: 'Ash', kind: 'email' }, ioFn, timers } = {}) {
   const fake = fakeIo();
-  const tokens = [];
-  const currentUser = user ? {
-    uid: 'u1',
-    getIdToken(force) { tokens.push(!!force); return Promise.resolve('tok' + tokens.length); }
-  } : null;
   const G = {
-    RELAY_URL: url,
-    DB: {
-      fb: { uid: 'u1', auth: { currentUser } }, user: 'Ash',
-      save: { partner: 25, partnerShiny: true }, ownsShiny: d => d === 25
-    },
-    Social: { me: { uid: 'u1', name: 'AshK' } }
+    DB: { online, me, save: { partner: 25, partnerShiny: true }, ownsShiny: d => d === 25 }
   };
   const st = (timers && timers.setTimeout) || setTimeout, ct = (timers && timers.clearTimeout) || clearTimeout;
   new Function('G', 'io', 'location', 'setTimeout', 'clearTimeout', source('js/net/relay.js'))(
-    G, ioFn === undefined ? fake.io : ioFn, { search }, st, ct);
-  return { R: G.Relay, G, fake, tokens, sock: () => fake.sockets[fake.sockets.length - 1] };
+    G, ioFn === undefined ? fake.io : ioFn, { protocol }, st, ct);
+  return { R: G.Relay, G, fake, sock: () => fake.sockets[fake.sockets.length - 1] };
 }
 
 async function online(t) {
@@ -63,24 +54,27 @@ async function online(t) {
   await p;
 }
 
-test('enabled needs both G.RELAY_URL and the relay URL flag', () => {
+test('enabled: signed in on the game server and served over http(s)', () => {
   assert.equal(setup().R.enabled, true);
-  assert.equal(setup({ search: '?dev&relay=1' }).R.enabled, true);
-  assert.equal(setup({ url: '' }).R.enabled, false);
-  assert.equal(setup({ search: '' }).R.enabled, false);
-  assert.equal(setup({ search: '?relayx' }).R.enabled, false);
+  assert.equal(setup({ protocol: 'http:' }).R.enabled, true);
+  assert.equal(setup({ protocol: 'file:' }).R.enabled, false);
+  assert.equal(setup({ online: false }).R.enabled, false);
+  const t = setup();
+  t.G.DB.online = false;
+  assert.equal(t.R.enabled, false, 'follows G.DB.online (logout)');
 });
 
-test('disabled: no socket opens and connect rejects with code disabled', async () => {
-  for (const t of [setup({ url: '' }), setup({ search: '?dev' }), setup({ ioFn: null })]) {
-    await assert.rejects(t.R.connect(), e => e.code === 'disabled');
+test('not signed in: connect rejects signed-out; no http(s) or no socket.io client: unreachable; never a socket', async () => {
+  for (const [t, code] of [[setup({ online: false }), 'signed-out'], [setup({ me: null }), 'signed-out'],
+    [setup({ protocol: 'file:' }), 'unreachable'], [setup({ ioFn: null }), 'unreachable']]) {
+    await assert.rejects(t.R.connect(), e => e.code === code);
     assert.equal(t.fake.sockets.length, 0);
     assert.equal(t.R.state, 'off');
     assert.equal(t.R.emit('sig', 'x', {}), false);
   }
 });
 
-test('connect: handshake, websocket only, state events, uid, idempotent', async () => {
+test('connect: same origin (no URL), websocket only, v 2 with the page epoch and no token, state events, uid', async () => {
   const t = setup(), states = [];
   t.R.on('state', s => states.push(s));
   assert.equal(t.R.state, 'off'); assert.equal(t.R.uid, null);
@@ -90,28 +84,31 @@ test('connect: handshake, websocket only, state events, uid, idempotent', async 
   await tick();
   const s = t.sock();
   assert.equal(t.fake.sockets.length, 1);
-  assert.equal(s.url, 'http://relay.test');
+  assert.equal(s.args, 1, 'io(opts): the page origin, so the session cookie goes by itself');
+  assert.equal(s.url, undefined);
   assert.deepEqual(s.opts.transports, ['websocket']);
   assert.equal(typeof s.opts.auth, 'function');
-  assert.deepEqual(s.auths, [{ v: 1, token: 'tok1', name: 'AshK', dex: 25, shiny: true }]);
-  assert.deepEqual(t.tokens, [false]);
+  assert.match(t.R.ep, /^[0-9a-f]{24}$/);
+  assert.deepEqual(s.auths, [{ v: 2, ep: t.R.ep, dex: 25, shiny: true }]);
+  assert.ok(!('token' in s.auths[0]) && !('name' in s.auths[0]), 'the server knows who you are from the cookie');
   s.accept();
   await p1;
   assert.equal(t.R.state, 'online'); assert.equal(t.R.uid, 'u1');
   assert.deepEqual(states, ['connecting', 'online']);
   await t.R.connect();
   assert.equal(t.fake.sockets.length, 1);
+  assert.notEqual(setup().R.ep, t.R.ep, 'another page load, another epoch');
 });
 
-test('handshake falls back to the account name and no shiny without one', async () => {
+test('handshake: no shiny without owning it', async () => {
   const t = setup();
-  t.G.Social = null; t.G.DB.ownsShiny = () => false;
+  t.G.DB.ownsShiny = () => false;
   t.R.connect(); await tick();
-  assert.deepEqual(t.sock().auths[0], { v: 1, token: 'tok1', name: 'Ash', dex: 25, shiny: false });
+  assert.deepEqual(t.sock().auths[0], { v: 2, ep: t.R.ep, dex: 25, shiny: false });
 });
 
 test('each server rejection maps to its code and closes the socket', async () => {
-  for (const code of ['old-version', 'busy']) {
+  for (const code of ['old-version', 'signed-out', 'banned', 'busy']) {
     const t = setup();
     const p = t.R.connect(); await tick();
     t.sock().reject(code);
@@ -119,10 +116,12 @@ test('each server rejection maps to its code and closes the socket', async () =>
     assert.equal(t.R.state, 'offline');
     assert.equal(t.sock().closed, true);
   }
-  const t = setup();
-  const p = t.R.connect(); await tick();
-  t.sock().reject('something-else');
-  await assert.rejects(p, e => e.code === 'unreachable');
+  for (const msg of ['something-else', 'bad-token', 'disabled']) {
+    const t = setup();
+    const p = t.R.connect(); await tick();
+    t.sock().reject(msg);
+    await assert.rejects(p, e => e.code === 'unreachable', msg);
+  }
 });
 
 test('unreachable server on the first try: rejects and stops retrying', async () => {
@@ -138,24 +137,14 @@ test('unreachable server on the first try: rejects and stops retrying', async ()
   assert.equal(t.R.state, 'online');
 });
 
-test('no signed in account rejects bad-token, local mode disabled, both without a socket', async () => {
-  const t = setup({ user: false });
-  await assert.rejects(t.R.connect(), e => e.code === 'bad-token');
-  assert.equal(t.fake.sockets.length, 0);
-  const l = setup();
-  l.G.DB.fb = null;
-  await assert.rejects(l.R.connect(), e => e.code === 'disabled');
-  assert.equal(l.fake.sockets.length, 0);
-});
-
 test('a rejection while reconnecting on its own reports the code through state', async () => {
   const t = setup(), states = [];
   await online(t);
   t.R.on('state', (...a) => states.push(a));
   const s = t.sock();
   s.drop('transport close');
-  s.reject('old-version');
-  assert.deepEqual(states, [['offline'], ['offline', 'old-version']]);
+  s.reject('signed-out');
+  assert.deepEqual(states, [['offline'], ['offline', 'signed-out']]);
   assert.equal(s.closed, true); assert.equal(t.R.uid, null);
 });
 
@@ -169,29 +158,7 @@ test('requests waiting for an ack fail as unreachable when the connection drops'
   t.sock().emitted[0][2]({ ok: true });       // ya no cuenta
 });
 
-test('bad-token: refreshes the token once and retries, then rejects', async () => {
-  let t = setup();
-  let p = t.R.connect(); await tick();
-  t.sock().reject('bad-token'); await tick();
-  assert.equal(t.sock().connects, 2);
-  assert.deepEqual(t.tokens, [false, true]);
-  assert.equal(t.sock().auths[1].token, 'tok2');
-  t.sock().accept();
-  await p;
-  assert.equal(t.R.state, 'online');
-
-  t = setup();
-  p = t.R.connect(); await tick();
-  const rejected = assert.rejects(p, e => e.code === 'bad-token');
-  t.sock().reject('bad-token'); await tick();
-  t.sock().reject('bad-token');
-  await rejected;
-  assert.equal(t.sock().connects, 2);
-  assert.deepEqual(t.tokens, [false, true]);
-  assert.equal(t.R.state, 'offline');
-});
-
-test('reconnect asks for a fresh token and network drops keep the socket', async () => {
+test('network drops keep the socket, and reconnecting sends the same epoch (a reconnect is not a reload)', async () => {
   const t = setup(), states = [];
   await online(t);
   t.R.on('state', s => states.push(s));
@@ -201,8 +168,9 @@ test('reconnect asks for a fresh token and network drops keep the socket', async
   assert.equal(t.R.uid, 'u1');
   s.netError();                              // un reintento que falla: sigue el mismo socket
   assert.equal(s.closed, false);
-  s.opts.auth(d => s.auths.push(d)); await tick();   // socket.io reintenta
-  assert.equal(s.auths[1].token, 'tok2');
+  t.G.DB.save.partner = 7;
+  s.opts.auth(d => s.auths.push(d));         // socket.io reintenta
+  assert.deepEqual(s.auths[1], { v: 2, ep: t.R.ep, dex: 7, shiny: false }, 'the current partner, the same epoch');
   s.accept();
   assert.equal(t.R.state, 'online');
   assert.deepEqual(states, ['offline', 'online']);
@@ -279,7 +247,7 @@ test('emit is fire and forget, and a no-op when not online', async () => {
   assert.equal(t.sock().emitted.length, 2);
 });
 
-test('on/off for server events; a throwing listener does not stop others', async () => {
+test('on/off for server events (invite and presence too); a throwing listener does not stop others', async () => {
   const t = setup(), got = [];
   const warn = console.warn; console.warn = () => {};
   try {
@@ -288,14 +256,18 @@ test('on/off for server events; a throwing listener does not stop others', async
     t.R.on('sig', sig);
     t.R.on('m', (f, seq, b) => got.push(['m', f, seq, b.length]));
     t.R.on('peer', (u, s) => got.push(['peer', u, s]));
+    t.R.on('invite', i => got.push(['invite', i.from]));
+    t.R.on('presence', (u, on) => got.push(['presence', u, on]));
     await online(t);
     const s = t.sock();
     s.fire('sig', 'host', { ice: [] });
     s.fire('m', 'host', 3, new Uint8Array(4));
     s.fire('peer', 'g1', 'away');
+    s.fire('invite', { from: 'f1', code: [1, 2, 3, 4] });
+    s.fire('presence', 'f1', true);
     t.R.off('sig', sig);
     s.fire('sig', 'host', { ice: [1] });
-    assert.deepEqual(got, [['sig', 'host', { ice: [] }], ['m', 'host', 3, 4], ['peer', 'g1', 'away']]);
+    assert.deepEqual(got, [['sig', 'host', { ice: [] }], ['m', 'host', 3, 4], ['peer', 'g1', 'away'], ['invite', 'f1'], ['presence', 'f1', true]]);
   } finally { console.warn = warn; }
 });
 
@@ -325,16 +297,21 @@ test('disconnect: closes the socket, clears state and rejects a pending connect'
   assert.deepEqual(states, ['connecting', 'online', 'off']);
   const p = t.R.connect();
   t.R.disconnect();
-  await assert.rejects(p, e => e.code === 'disabled');
+  await assert.rejects(p, e => e.code === 'signed-out');
 });
 
-test('dev.html loads the config after firebase-config and socket.io then relay before social', () => {
+test('dev.html loads socket.io then relay before social; no relay-config.js and no G.RELAY_URL left', () => {
   const html = source('dev.html');
   const at = f => { const i = html.indexOf(`<script defer src="${f}"></script>`); assert.ok(i > 0, f); return i; };
-  assert.ok(at('js/core/firebase-config.js') < at('js/net/relay-config.js'));
-  assert.ok(at('js/net/relay-config.js') < at('js/core/db.js'));
+  assert.ok(at('js/net/api.js') < at('js/core/db.js'));
   assert.ok(at('js/vendor/socket.io.min.js') < at('js/net/relay.js'));
   assert.ok(at('js/net/relay.js') < at('js/net/social.js'));
+  assert.ok(!html.includes('relay-config.js'));
+  assert.ok(!fs.existsSync(path.join(__dirname, '..', 'js/net/relay-config.js')));
+  for (const f of fs.readdirSync(path.join(__dirname, '..', 'js/net'))) {
+    const src = source('js/net/' + f);
+    assert.ok(!src.includes('RELAY_URL'), f);
+    assert.ok(!/[?&]relay\b|has\('relay'\)/.test(src), f + ': no ?relay flag');
+  }
   assert.match(source('js/vendor/socket.io.min.js'), /^\/\*!\n \* Socket\.IO v4\.8\.4\n/);
-  assert.match(source('js/net/relay-config.js'), /^G\.RELAY_URL = '';$/m);
 });

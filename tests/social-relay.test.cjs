@@ -1,6 +1,6 @@
-// Salas en el servidor propio (?relay): js/net/social.js de verdad, con un G.Relay
-// falso unido a un servidor en memoria (docs/relay-coop/02-protocol.md) y un
-// Firestore falso para amigos e invitaciones. Sin ?relay, todo por la Realtime Database.
+// Salas en el servidor del juego: js/net/social.js de verdad, con un G.Relay falso
+// unido a un servidor en memoria (docs/relay-coop/02-protocol.md) y un Firestore
+// falso para los amigos e invitaciones de antes (hasta el paso 6).
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -87,6 +87,7 @@ function fakeRelay(srv, uid, info, connectErr) {
       return a;
     },
     emit(ev, p) { calls.push([ev, clone(p)]); srv.handle(uid, ev, clone(p)); },
+    disconnect() { calls.push(['disconnect']); R.state = 'off'; R.room = null; },
     on(ev, fn) { if (!ls.has(ev)) ls.set(ev, new Set()); ls.get(ev).add(fn); },
     off(ev, fn) { if (ls.has(ev)) ls.get(ev).delete(fn); },
     fire(ev, ...args) { if (ev === 'room') R.room = args[0]; setImmediate(() => { for (const fn of ls.get(ev) || []) fn(...args); }); },
@@ -137,39 +138,24 @@ function fakeFs() {
   };
 }
 
-function fakeRtdb(log) {
-  const ref = p => ({
-    path: p,
-    async set() { log.push(['set', p]); },
-    async update() { log.push(['update', p]); },
-    async remove() { log.push(['remove', p]); },
-    async get() { log.push(['get', p]); return { val: () => null, numChildren: () => 0 }; },
-    on() { log.push(['on', p]); }, off() {},
-    onDisconnect: () => ({ remove() { log.push(['onDisconnect', p]); }, cancel: async () => {} }),
-    child: c => ref(p + '/' + c),
-    orderByChild: () => ({ equalTo: () => ({ limitToFirst: () => ({ async get() { log.push(['query', p]); return { forEach() {} }; } }) }) })
-  });
-  return { ref, goOnline() { log.push(['goOnline']); }, goOffline() { log.push(['goOffline']); } };
-}
-
 // ---------------- un jugador ----------------
 const NAMES = { pikachu: 25, onix: 95, mew: 151, eevee: 133, bulbasaur: 1, charmander: 4, squirtle: 7 };
 function player(uid, name, o = {}) {
-  const rtdbLog = [], store = new Map(o.storage || []);
+  const store = new Map(o.storage || []);
   if (!store.has('ps.nick.' + uid)) store.set('ps.nick.' + uid, name);
   const settings = o.settings || {};
   const G = {
     DB: {
       online: true, user: name, nameAccount: false, save: { name, partner: o.dex || 25, partnerShiny: !!o.shiny },
-      fb: { uid, fs: o.fs || fakeFs(), rtdb: fakeRtdb(rtdbLog) },
+      me: { uid, name, kind: 'email' },
+      // Los amigos de antes (Firestore) siguen ahí hasta el paso 6; noFb: como hoy, sin Firebase.
+      fb: o.noFb ? null : { uid, fs: o.fs || fakeFs() },
       setName() {}, ownsShiny: () => true, onLeave() {}
     },
     Settings: { get: k => settings[k] },
-    Net: { isLocalIp: ip => /^192\.168\./.test(ip), publicIp: async () => '203.0.113.7' }
+    Net: { isLocalIp: ip => /^192\.168\./.test(ip) }
   };
-  if (o.srv) G.Relay = fakeRelay(o.srv, uid, { name, dex: o.dex || 25, shiny: !!o.shiny }, o.connectErr);
-  if (o.relayOff && G.Relay) G.Relay.enabled = false;
-  if (o.noRelay) delete G.Relay;
+  G.Relay = fakeRelay(o.srv || server(), uid, { name, dex: o.dex || 25, shiny: !!o.shiny }, o.connectErr);
   if (!o.noRoomCode) {
     G.RoomCode = {
       parseCode: s => {
@@ -182,17 +168,15 @@ function player(uid, name, o = {}) {
     G, console: { warn() {}, log: console.log },
     localStorage: { getItem: k => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) },
     fetch: () => Promise.reject(Error('offline')),
-    firebase: { database: { ServerValue: { TIMESTAMP: 0 } }, firestore: { FieldValue: { serverTimestamp: () => Date.now() } } },
+    firebase: { firestore: { FieldValue: { serverTimestamp: () => Date.now() } } },
     setTimeout, clearTimeout, setImmediate, Date, crypto: globalThis.crypto, TextEncoder, btoa
   };
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx);
   const S = G.Social, events = [];
   S.on(w => events.push(w));
-  return { G, S, R: G.Relay, rtdbLog, events, store, settings };
+  return { G, S, R: G.Relay, events, store, settings };
 }
-// Las escrituras y lecturas de salas en la Realtime Database (goOffline al entrar no cuenta).
-const roomTraffic = p => p.rtdbLog.filter(e => e[0] !== 'goOffline');
 
 async function pair(o = {}) {
   const srv = o.srv || server(), sharedFs = fakeFs();
@@ -202,40 +186,75 @@ async function pair(o = {}) {
   return { srv, host, guest, fs: sharedFs };
 }
 
-// ---------------- sin ?relay: como siempre ----------------
+// ---------------- entrar en la cuenta ----------------
 
-test('relay off: rooms go through the Realtime Database and G.Relay is never called', async () => {
-  for (const which of ['disabled', 'missing']) {
-    const srv = server();
-    const p = player('H1', 'Ash', which === 'disabled' ? { srv, relayOff: true } : { noRelay: true });
-    await p.S.start();
-    const r = await p.S.createRoom();
-    assert.equal(r.id, 'H1', which + ': the room is still named after the host');
-    assert.equal(r.relay, undefined);
-    assert.ok(p.rtdbLog.some(e => e[0] === 'set' && e[1] === 'rooms/H1'));
-    p.S.setOpen(false); p.S.refreshMember(); p.S.dropMember('X');
-    assert.ok(p.rtdbLog.some(e => e[0] === 'set' && e[1] === 'rooms/H1/open'));
-    assert.ok(p.rtdbLog.some(e => e[0] === 'update' && e[1] === 'rooms/H1/m/H1'));
-    assert.ok(p.rtdbLog.some(e => e[0] === 'remove' && e[1] === 'rooms/H1/m/X'));
-    const j = await p.S.joinRoom('OTHER');
-    assert.equal(j.ok, false);
-    assert.equal(typeof j.error, 'string', 'errors are still the old strings');
-    if (p.R) assert.deepEqual(p.R.calls, [], which + ': no relay call');
-  }
+test('start: without Firebase the nickname is the account name, and the socket opens right away', async () => {
+  const p = player('H1', 'Ash', { noFb: true });
+  assert.equal(await p.S.start(), 'ok');
+  assert.deepEqual(clone(p.S.me), { uid: 'H1', name: 'Ash' });
+  assert.equal(p.S.uid, 'H1');
+  assert.deepEqual(p.R.calls, [['connect']]);
+  assert.equal(await p.S.start(), 'ok');
+  assert.equal(p.R.sent('connect').length, 1);
+  await p.S.ensureFriends();
+  assert.equal(p.S.friends.length, 0);
+  const off = player('H2', 'Brock', { noFb: true });
+  off.G.DB.online = false;
+  assert.equal(await off.S.start(), 'off');
+  assert.deepEqual(off.R.calls, []);
 });
 
-test('relay off: invites carry no code', async () => {
-  const sharedFs = fakeFs();
-  sharedFs.col('friendships').set('G1_H1', { users: ['G1', 'H1'], from: 'H1', to: 'G1', status: 'ok', names: { H1: 'Ash', G1: 'Misty' } });
-  const p = player('H1', 'Ash', { noRelay: true, fs: sharedFs });
-  await p.S.start(); await p.S.ensureFriends();
-  const r = await p.S.invite('G1');
-  assert.equal(r.ok, true);
-  const inv = sharedFs.col('inv').get('G1_H1');
-  assert.equal(inv.room, 'H1');
-  assert.equal('code' in inv, false);
+test('stop (logout): leaves the room, then closes the socket', async () => {
+  const { host } = await pair();
+  await host.S.createRoom();
+  await host.S.stop('logout');
+  assert.deepEqual(host.R.calls.slice(-2).map(c => c[0]), ['leave', 'disconnect']);
+  assert.equal(host.S.room, null);
+  assert.equal(host.S.started, false);
 });
 
+test('reload: the server still has you in a room, so the room comes back on its own', async () => {
+  const { srv, host, guest } = await pair();
+  await host.S.createRoom();
+  await guest.S.joinRoom(host.S.room.code);
+  host.S.setOpen(false); host.S.setPlaying(true); await settle();
+  // El invitado recarga: página nueva, sin sala; al conectar, el servidor le manda la suya.
+  const g2 = player('G1', 'Misty', { srv, dex: 120 });
+  await g2.S.start(); await settle();
+  srv.clients.get('G1').fire('room', { code: host.S.room.code, state: 'playing', mode: 'direct', host: 'H1', directWaitMs: 6000,
+    members: srv.rooms.get(host.S.room.id).members });
+  await settle();
+  assert.ok(g2.S.room, 'back in the room');
+  assert.equal(g2.S.room.id, host.S.room.id);
+  assert.equal(g2.S.room.isHost, false);
+  assert.ok(g2.events.includes('room'));
+  assert.deepEqual(g2.R.sent('join'), [], 'no join needed: the server kept the slot');
+  // El anfitrión que recarga en partida la acaba (la partida se perdió) para que vuelva a admitir gente.
+  const h2 = player('H1', 'Ash', { srv });
+  await h2.S.start();
+  srv.clients.get('H1').fire('room', clone(Object.assign({}, srv.rooms.get(host.S.room.id), { directWaitMs: 6000 })));
+  await settle();
+  assert.equal(h2.S.room.isHost, true);
+  assert.deepEqual(h2.R.sent('end'), [['end', {}]]);
+  await settle();
+  assert.equal(srv.rooms.get(h2.S.room.id).state, 'lobby');
+});
+
+test('reload: a room you just left, or one you are not in, is not adopted from a late snapshot', async () => {
+  const { srv, host, guest } = await pair();
+  await host.S.createRoom();
+  await guest.S.joinRoom(host.S.room.code);
+  const snap = clone(Object.assign({}, srv.rooms.get(host.S.room.id), { directWaitMs: 6000 }));
+  await guest.S.leaveRoom();
+  guest.R.fire('room', snap); await settle();
+  assert.equal(guest.S.room, null, 'the snapshot from before the leave does not put you back');
+  const other = player('X1', 'Brock', { srv });
+  await other.S.start();
+  other.R.fire('room', snap); await settle();
+  assert.equal(other.S.room, null);
+});
+
+// ---------------- crear ----------------
 // ---------------- crear ----------------
 
 test('createRoom: connects, sends create (direct by default) and gives the usual room plus code and mode', async () => {
@@ -243,7 +262,7 @@ test('createRoom: connects, sends create (direct by default) and gives the usual
   const p = player('H1', 'Ash', { srv, dex: 6, shiny: true });
   await p.S.start();
   const r = await p.S.createRoom();
-  assert.deepEqual(p.R.calls.slice(0, 2), [['connect'], ['create', { mode: 'direct' }]]);
+  assert.deepEqual(p.R.calls.slice(0, 3), [['connect'], ['connect'], ['create', { mode: 'direct' }]], 'on start, and again before create');
   assert.equal(r, p.S.room);
   assert.equal(r.id, '25-95-151-133');
   assert.deepEqual(r.code, [25, 95, 151, 133]);
@@ -252,10 +271,8 @@ test('createRoom: connects, sends create (direct by default) and gives the usual
   assert.equal(r.isHost, true);
   assert.equal(r.open, true);
   assert.equal(r.lost, false);
-  assert.equal(r.relay, true);
   assert.deepEqual(clone(r.members), [{ uid: 'H1', name: 'Ash', dex: 6, shiny: true, online: true, path: null, sameNet: false, hideIp: false }]);
   assert.ok(p.events.includes('room'));
-  assert.deepEqual(roomTraffic(p), [], 'no Realtime Database at all');
   assert.equal(await p.S.createRoom(), r, 'already in a room: the same one');
   assert.equal(p.R.sent('create').length, 1);
 });
@@ -280,7 +297,7 @@ test('createRoom: server and relay errors reject as Error with .code', async () 
   await p.S.start();
   await assert.rejects(p.S.createRoom(), e => isErr(e) && e.code === 'busy');
   assert.equal(p.S.room, null);
-  for (const code of ['old-version', 'bad-token', 'unreachable']) {
+  for (const code of ['old-version', 'signed-out', 'banned', 'unreachable']) {
     const q = player('H2', 'Brock', { srv: server(), connectErr: code });
     await q.S.start();
     await assert.rejects(q.S.createRoom(), e => isErr(e) && e.code === code);
@@ -306,8 +323,6 @@ test('joinRoom: by code array, room id string or typed names; the host sees the 
     assert.deepEqual(host.S.room.members.map(m => m.uid), ['H1', 'G1'], 'host first, then by arrival');
     assert.equal(host.S.room.members[1].dex, 120);
     assert.ok(host.events.filter(e => e === 'room').length >= 2);
-    assert.deepEqual(roomTraffic(host), []);
-    assert.deepEqual(roomTraffic(guest), []);
     assert.deepEqual(clone(await guest.S.joinRoom(input)), { ok: true }, 'joining the room you are in does nothing');
     assert.equal(guest.R.sent('join').length, 1);
   }
@@ -384,7 +399,6 @@ test('leaveRoom sends leave; when the host leaves, the guest gets room-closed', 
   await settle();
   assert.equal(guest.S.room, null);
   assert.ok(guest.events.includes('room-closed'));
-  assert.deepEqual(roomTraffic(guest), []);
 });
 
 test('refreshMember sends member with name, dex and shiny', async () => {
@@ -416,7 +430,6 @@ test('setOpen and setPlaying fold into one start and one end, from the host only
   assert.deepEqual(host.R.sent('end'), [['end', {}]]);
   assert.equal(host.S.room.open, true);
   assert.deepEqual(guest.R.sent('start').concat(guest.R.sent('end')), [], 'guests never send start / end');
-  assert.deepEqual(roomTraffic(host), []);
 });
 
 test('dropMember sends kick; the kicked guest gets room-closed and the host the new list', async () => {
@@ -453,12 +466,11 @@ test('peer: away and back flip online, gone removes the member; closed ends the 
   host.R.fire('closed', 'idle'); await settle();
   assert.equal(host.S.room, null);
   assert.equal(host.events.at(-1), 'room-closed');
-  assert.deepEqual(roomTraffic(host), []);
 });
 
-test('room events for another room, or with no room, are ignored', async () => {
+test('room events for another room, or for a room you are not in, are ignored', async () => {
   const { host } = await pair();
-  host.R.fire('room', { code: [1, 4, 7, 152], state: 'lobby', mode: 'direct', host: 'H1', members: [{ uid: 'H1' }] });
+  host.R.fire('room', { code: [1, 4, 7, 152], state: 'lobby', mode: 'direct', host: 'X', members: [{ uid: 'X' }] });
   await settle();
   assert.equal(host.S.room, null);
   await host.S.createRoom();
@@ -471,22 +483,22 @@ test('room events for another room, or with no room, are ignored', async () => {
 
 // ---------------- misma wifi ----------------
 
-test('same Wi-Fi with the relay: setLocal keeps the IP but writes no lan key, findLocal reads nothing', async () => {
+test('same Wi-Fi: setLocal keeps the IP only here (nothing goes to the server), and there is no join by IP', async () => {
   const { host, guest } = await pair();
   assert.deepEqual(clone(await host.S.setLocal('192.168.1.20')), { ok: true });
-  assert.equal(host.S.room.relay, true, 'setLocal creates a server room');
+  assert.ok(host.S.room.code, 'setLocal creates a server room');
   assert.equal(host.S.room.lanIp, '192.168.1.20');
-  await settle();
-  const f = await guest.S.findLocal('192.168.1.20');
-  assert.equal(f.ok, false);
-  assert.equal(f.code, 'not-found');
-  assert.deepEqual(roomTraffic(host), []);
-  assert.deepEqual(roomTraffic(guest), []);
+  assert.ok(!JSON.stringify(host.R.calls).includes('192.168'));
+  assert.equal((await guest.S.setLocal('8.8.8.8')).ok, false);
+  await guest.S.joinRoom(host.S.room.code);
+  assert.equal((await guest.S.setLocal('192.168.1.30')).ok, false, 'host only');
+  assert.equal(guest.S.findLocal, undefined);
+  assert.equal(guest.S.lanKey, undefined);
 });
 
 // ---------------- invitaciones ----------------
 
-test('invites carry the code with the relay, and acceptInvite joins by that code', async () => {
+test('invites carry the code, and acceptInvite joins by that code', async () => {
   const { host, guest, fs: sharedFs } = await pair({ guest: { storage: [['ps.hasfr.G1', '1']] } });
   sharedFs.col('friendships').set('G1_H1', { users: ['G1', 'H1'], from: 'H1', to: 'G1', status: 'ok', names: { H1: 'Ash', G1: 'Misty' } });
   await host.S.ensureFriends();
@@ -505,7 +517,7 @@ test('invites carry the code with the relay, and acceptInvite joins by that code
   assert.equal(sharedFs.col('inv').has('G1_H1'), false, 'the invite is used up');
 });
 
-test('an old invite (room id only, no code) with the relay on fails cleanly', async () => {
+test('an old invite (room id only, no code) fails cleanly', async () => {
   const { guest, fs: sharedFs } = await pair({ guest: { storage: [['ps.hasfr.G1', '1']] } });
   await sharedFs.collection('inv').doc('G1_H1').set({ to: 'G1', from: 'H1', room: 'H1', name: 'Ash', at: Date.now() });
   await settle();
@@ -552,14 +564,14 @@ test('a late snapshot does not swallow the next start', async () => {
 test('invite and setLocal return the error when the room cannot be created', async () => {
   const sharedFs = fakeFs();
   sharedFs.col('friendships').set('G1_H1', { users: ['G1', 'H1'], from: 'H1', to: 'G1', status: 'ok', names: { H1: 'Ash', G1: 'Misty' } });
-  const p = player('H1', 'Ash', { srv: server(), fs: sharedFs, connectErr: 'disabled' });
+  const p = player('H1', 'Ash', { srv: server(), fs: sharedFs, connectErr: 'signed-out' });
   await p.S.start(); await p.S.ensureFriends();
   const r = await p.S.invite('G1');
   assert.equal(r.ok, false);
-  assert.equal(r.code, 'disabled');
+  assert.equal(r.code, 'signed-out');
   assert.equal(sharedFs.col('inv').size, 0);
   const l = await p.S.setLocal('192.168.1.20');
   assert.equal(l.ok, false);
-  assert.equal(l.code, 'disabled');
+  assert.equal(l.code, 'signed-out');
   assert.equal(p.S.room, null);
 });

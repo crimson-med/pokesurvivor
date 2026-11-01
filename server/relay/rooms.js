@@ -1,16 +1,18 @@
 /* ============ rooms.js: las salas del cooperativo (sin red) ============
- * Toda la lógica de las salas, sin sockets: funciones y un Map. server.js
+ * Toda la lógica de las salas, sin sockets: funciones y un Map. io.js
  * llama a estas funciones y luego avisa a los jugadores según lo que devuelven.
  *
  * Sala    { key, code, mode, host, state, v, members, ... }
  *         key   clave de la sala: los cuatro números del código unidos con '-'
- *               (el orden cuenta) o, en el modo provisional { id }, el id, que
- *               tiene que ser el uid del anfitrión
- *         code  [d1, d2, d3, d4] o null en el modo provisional
+ *               (el orden cuenta)
+ *         code  [d1, d2, d3, d4]
  *         state 'lobby' | 'playing' (jugando no entra nadie nuevo)
- * Jugador { uid, name, dex, shiny, online, path, sameNet, hideIp, sid, pubIp, awayAt }
+ * Jugador { uid, name, dex, shiny, online, path, sameNet, hideIp, ep, sid, pubIp, awayAt }
  *         path    null hasta que el anfitrión dice 'direct' o 'server'
  *         sameNet misma IP pública que el anfitrión (la IP nunca sale de aquí)
+ *         ep      la carga de la página de su conexión (un texto al azar que manda
+ *                 el juego al conectar): si cambia, ha recargado y los demás
+ *                 empiezan de cero la numeración con él (net.js)
  *
  * Las funciones que cambian algo devuelven un resultado:
  *   { ok, err?, room?, changed: Set<sala>, closed: [{ room, why, except? }],
@@ -28,7 +30,7 @@ const AWAY_MS = 30 * 1000;          // hueco guardado a quien se cae
 const IDLE_MS = 30 * 60 * 1000;     // sala de espera sin cambios
 const REUSE_MS = 10 * 60 * 1000;    // un código cerrado no se repite en este tiempo
 const CODE_TRIES = 20;
-const CODE_RE = /^\d+-\d+-\d+-\d+$/;
+const CODE_RE = /^\d{1,6}-\d{1,6}-\d{1,6}-\d{1,6}$/;
 const PATHS = ['direct', 'server'];
 
 function cleanInfo(info) {
@@ -38,14 +40,11 @@ function cleanInfo(info) {
   return { name, dex, shiny: i.shiny === true };
 }
 
-// Clave de sala a partir de lo que manda join: cuatro números o un id.
+// Clave de sala a partir de lo que manda join: cuatro números (o en texto, 'a-b-c-d').
 function keyOf(code) {
-  if (Array.isArray(code)) {
-    if (code.length !== 4 || !code.every(n => Number.isInteger(n) && n > 0)) return null;
-    return code.join('-');
-  }
-  if (typeof code === 'string' && code && code.length <= 128) return code;
-  return null;
+  if (typeof code === 'string' && CODE_RE.test(code)) code = code.split('-').map(Number);
+  if (!Array.isArray(code) || code.length !== 4 || !code.every(n => Number.isInteger(n) && n > 0)) return null;
+  return code.join('-');
 }
 
 function createRooms(opts = {}) {
@@ -70,7 +69,7 @@ function createRooms(opts = {}) {
   function member(uid, info, o) {
     return {
       uid, ...cleanInfo(info),
-      online: true, path: null, sameNet: false, hideIp: !!o.hideIp,
+      online: true, path: null, sameNet: false, hideIp: !!o.hideIp, ep: o.ep || null,
       sid: o.sid || null, pubIp: o.pubIp || null, awayAt: null,
     };
   }
@@ -86,7 +85,7 @@ function createRooms(opts = {}) {
     if (rooms.get(room.key) !== room) return;
     rooms.delete(room.key);
     for (const uid of room.members.keys()) if (where.get(uid) === room.key) where.delete(uid);
-    if (room.code) recent.set(room.key, now());
+    recent.set(room.key, now());
     room.closedAt = now();
     f.changed.delete(room);
     f.closed.push({ room, why, except });
@@ -129,26 +128,17 @@ function createRooms(opts = {}) {
     return key != null ? rooms.get(key) || null : null;
   }
 
-  // create(uid, info, { id } | { mode }, extra) con extra = { pubIp, sid, v }
+  // create(uid, info, { mode }, extra) con extra = { pubIp, sid, v, ep }
   function create(uid, info, o = {}, extra = {}) {
     const f = fx();
     const mode = o.mode === 'server' ? 'server' : 'direct';
-    let key = null, code = null;
-    if (o.id != null) {
-      // El id es el uid del anfitrión (como la sala de hoy): nadie puede
-      // quedarse con el de otro.
-      if (o.id !== uid || CODE_RE.test(o.id)) return fail(f, 'bad-id');
-      key = o.id;
-    }
     // Lleno: sólo se puede crear si se cierra a la vez la sala que ya tienes.
     const mine = roomOf(uid);
     if (rooms.size >= maxRooms && !(mine && mine.host === uid)) return fail(f, 'busy');
     detach(uid, f);   // una sala por cuenta: la vieja se cierra
-    if (key == null) {
-      code = pickCode();
-      if (!code) return fail(f, 'busy');
-      key = code.join('-');
-    }
+    const code = pickCode();
+    if (!code) return fail(f, 'busy');
+    const key = code.join('-');
     const t = now();
     const room = {
       key, code, mode, host: uid, state: 'lobby', v: extra.v,
@@ -163,7 +153,7 @@ function createRooms(opts = {}) {
     return f;
   }
 
-  // join(code, uid, info, { pubIp, sid, v, hideIp })
+  // join(code, uid, info, { pubIp, sid, v, ep, hideIp })
   function join(code, uid, info, o = {}) {
     const f = fx();
     const key = keyOf(code);
@@ -194,6 +184,7 @@ function createRooms(opts = {}) {
   function reattach(room, m, o, f) {
     if (o.sid) m.sid = o.sid;
     if (o.pubIp) m.pubIp = o.pubIp;
+    if (o.ep) m.ep = o.ep;
     if (!m.online) {
       m.online = true;
       m.awayAt = null;
@@ -286,7 +277,7 @@ function createRooms(opts = {}) {
   }
 
   // Pasa el tiempo: huecos caducados, salas de espera abandonadas y códigos
-  // viejos. server.js la llama cada segundo.
+  // viejos. io.js la llama cada segundo.
   function expire() {
     const f = fx();
     const t = now();
@@ -320,14 +311,14 @@ function createRooms(opts = {}) {
 
   function snapshot(room) {
     return {
-      code: room.code ? room.code.slice() : null,
+      code: room.code.slice(),
       state: room.state,
       mode: room.mode,
       host: room.host,
       directWaitMs,
       members: [...room.members.values()].map(m => ({
         uid: m.uid, name: m.name, dex: m.dex, shiny: m.shiny,
-        online: m.online, path: m.path, sameNet: m.sameNet, hideIp: m.hideIp,
+        online: m.online, path: m.path, sameNet: m.sameNet, hideIp: m.hideIp, ep: m.ep,
       })),
     };
   }

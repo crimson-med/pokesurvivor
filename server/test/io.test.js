@@ -17,6 +17,11 @@ const WORDS = Array.from({ length: 100 }, (_, i) => i + 1);
 
 let srv, url;
 const open = [];
+// Lo que hace el ranking al empezar una partida en grupo (deps.rank, paso 7).
+const coopRuns = [];
+let rank = null;
+// Cuentas bloqueadas (users.banned): lo que diría guard.fromCookie.
+const banned = new Set();
 
 function start(env = {}) {
   const cfg = loadConfig({ SITE_URL: ORIGIN, ...env });
@@ -27,6 +32,8 @@ function start(env = {}) {
       // Todos los clientes de la prueba vienen de 127.0.0.1: el tope por IP se
       // sube aquí (se prueba en limits.test.js) y queda el de la cuenta.
       limits: createLimits({ joinIp: [1000, 60000] }),
+      rank: { openCoopRun: room => (rank ? rank.openCoopRun(room) : null) },
+      sessionOf: h => { const w = srv.guard.fromCookie(h); return w && banned.has(w.uid) ? { ...w, banned: true } : w; },
     },
   });
 }
@@ -53,7 +60,7 @@ function cookieFor(uid) {
 function client(uid, o = {}) {
   const cookie = o.cookie !== undefined ? o.cookie : cookieFor(uid);
   const s = ioc(o.url || url, {
-    auth: { v: 1, dex: 25, shiny: false, ...o.auth },
+    auth: { v: 2, dex: 25, shiny: false, ep: 'ep-' + uid, ...o.auth },
     transports: ['websocket'], reconnection: false, forceNew: true,
     extraHeaders: { ...(cookie ? { cookie } : {}), ...o.headers },
   });
@@ -98,9 +105,22 @@ async function hostAndGuest(h, g, mode = 'direct') {
   return { host, guest, made, joined };
 }
 
-test('una v distinta se rechaza con old-version', async () => {
-  const err = await connected(client('v0', { auth: { v: 99 } })).catch(e => e);
-  assert.equal(err.message, 'old-version');
+test('una v distinta se rechaza con old-version; la 2 y la anterior entran', async () => {
+  for (const v of [99, 0, undefined, '2']) {
+    const err = await connected(client('v0', { auth: { v } })).catch(e => e);
+    assert.equal(err.message, 'old-version', String(v));
+  }
+  await connected(client('v1', { auth: { v: 1 } }));
+  await connected(client('v2'));
+});
+
+test('una cuenta bloqueada no entra: banned', async () => {
+  banned.add('ban1');
+  try {
+    const err = await connected(client('ban1')).catch(e => e);
+    assert.equal(err.message, 'banned');
+  } finally { banned.delete('ban1'); }
+  await connected(client('ban1'));
 });
 
 test('con la cookie de una sesión entra; sin ella, con otra o con una inventada: signed-out', async () => {
@@ -152,7 +172,7 @@ test('create y join: código, estado de la sala y evento room', async () => {
   const [snap] = await roomEv;
   assert.deepEqual(snap.members.map(m => m.uid), ['ha', 'ga']);
   const g = snap.members[1];
-  assert.deepEqual(g, { uid: 'ga', name: 'ga', dex: 25, shiny: false, online: true, path: null, sameNet: true, hideIp: true });
+  assert.deepEqual(g, { uid: 'ga', name: 'ga', dex: 25, shiny: false, online: true, path: null, sameNet: true, hideIp: true, ep: 'ep-ga' });
   assert.ok(!JSON.stringify(snap).includes('127.0.0.1'));
   const reversed = made.code.slice().reverse();
   if (reversed.join() !== made.code.join()) {
@@ -161,16 +181,15 @@ test('create y join: código, estado de la sala y evento room', async () => {
   }
 });
 
-test('create con { id } (modo provisional) y join con el id', async () => {
+test('sólo códigos: create con { id } da una sala con código y join por uid no encuentra nada', async () => {
   const host = await connected(client('hid'));
   const made = await req(host, 'create', { id: 'hid' });
   assert.equal(made.ok, true);
-  assert.equal(made.code, null);
-  assert.equal(made.room.code, null);
+  assert.equal(made.code.length, 4);
+  assert.deepEqual(made.room.code, made.code);
   const guest = await connected(client('gid'));
-  const joined = await req(guest, 'join', { code: 'hid' });
-  assert.equal(joined.ok, true);
-  assert.equal(joined.room.members.length, 2);
+  assert.equal((await req(guest, 'join', { code: 'hid' })).err, 'not-found');
+  assert.equal((await req(guest, 'join', { code: made.code })).ok, true);
 });
 
 test('anfitrión e invitado se pasan sig y m; from es el uid del que manda', async () => {
@@ -289,11 +308,50 @@ test('expulsado mientras estaba caído: al volver recibe closed(kicked)', async 
 test('start y end sólo para el anfitrión; jugando no entra nadie nuevo', async () => {
   const { host, guest, made } = await hostAndGuest('hi', 'gi');
   assert.equal((await req(guest, 'start', {})).err, 'not-host');
-  assert.deepEqual(await req(host, 'start', {}), { ok: true });
+  assert.deepEqual(await req(host, 'start', {}), { ok: true, run: null });
   const late = await connected(client('gi2'));
   assert.equal((await req(late, 'join', { code: made.code })).err, 'started');
   assert.deepEqual(await req(host, 'end', {}), { ok: true });
   assert.equal((await req(late, 'join', { code: made.code })).ok, true);
+});
+
+test('start abre la partida en grupo del ranking (deps.rank.openCoopRun) y su run va en la respuesta', async () => {
+  const { host, guest } = await hostAndGuest('hr', 'gr');
+  rank = { openCoopRun: room => { coopRuns.push([room.host, [...room.members.keys()], room.state]); return 'run-1'; } };
+  try {
+    assert.equal((await req(guest, 'start', {})).err, 'not-host');
+    assert.deepEqual(coopRuns, [], 'only when the host really starts');
+    assert.deepEqual(await req(host, 'start', {}), { ok: true, run: 'run-1' });
+    assert.deepEqual(coopRuns, [['hr', ['hr', 'gr'], 'playing']]);
+    // Promesa o fallo: la partida empieza igual (sin run si falla).
+    rank = { openCoopRun: async () => ({ id: 'run-2' }) };
+    assert.deepEqual(await req(host, 'start', {}), { ok: true, run: { id: 'run-2' } });
+    const err = console.error; console.error = () => {};
+    try {
+      rank = { openCoopRun: () => { throw new Error('db'); } };
+      assert.deepEqual(await req(host, 'start', {}), { ok: true, run: null });
+      rank = { openCoopRun: async () => { throw new Error('db'); } };
+      assert.deepEqual(await req(host, 'start', {}), { ok: true, run: null });
+    } finally { console.error = err; }
+  } finally { rank = null; }
+});
+
+test('ep: el invitado que recarga vuelve con otro ep y el anfitrión lo ve en la foto de la sala', async () => {
+  const { host, guest } = await hostAndGuest('hep', 'gep');
+  await new Promise(r => setTimeout(r, 100));     // (que lleguen antes las fotos del join)
+  const away = once(host, 'peer'), awayRoom = once(host, 'room');
+  guest.close();
+  await away; await awayRoom;
+  const online = once(host, 'peer');
+  const roomEv = once(host, 'room');   // (peer y room salen juntos: online primero)
+  await connected(client('gep', { auth: { ep: 'recargada' } }));
+  assert.deepEqual(await online, ['gep', 'online']);
+  const [snap] = await roomEv;
+  assert.deepEqual(snap.members.map(m => [m.uid, m.ep, m.online]), [['hep', 'ep-hep', true], ['gep', 'recargada', true]]);
+  // Un ep raro no se guarda.
+  const bad = await connected(client('gep2', { auth: { ep: 'x'.repeat(40) } }));
+  const made = await req(bad, 'create', { mode: 'direct' });
+  assert.equal(made.room.members[0].ep, null);
 });
 
 test('el anfitrión se va: closed(host-left) para el invitado', async () => {
@@ -341,5 +399,5 @@ test('member cambia dex y shiny, no el nombre de la cuenta', async () => {
   const ev = once(host, 'room');
   guest.emit('member', { name: 'hm', dex: 7, shiny: true });
   const [snap] = await ev;
-  assert.deepEqual(snap.members[1], { uid: 'gm', name: 'gm', dex: 7, shiny: true, online: true, path: null, sameNet: true, hideIp: false });
+  assert.deepEqual(snap.members[1], { uid: 'gm', name: 'gm', dex: 7, shiny: true, online: true, path: null, sameNet: true, hideIp: false, ep: 'ep-gm' });
 });
